@@ -46,8 +46,9 @@
               Start Mic
             </button>
             <select id="sttEngineSelect" class="compact-select" aria-label="Speech recognition engine">
-              <option value="whisper">Whisper WebAI (Offline)</option>
-              <option value="webspeech">Web Speech API (Instant)</option>
+              <option value="moonshine" selected>Moonshine WebAI (Fast Offline)</option>
+              <option value="webspeech">Web Speech (Instant Stream)</option>
+              <option value="whisper">Whisper Tiny.en (Offline)</option>
             </select>
             <div class="mic-meter" aria-hidden="true">
               <div id="micLevelFill" class="mic-meter-fill"></div>

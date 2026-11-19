@@ -1,57 +1,102 @@
 import { env, pipeline } from "@huggingface/transformers";
 
-// Always run locally in browser via HuggingFace CDN cache (no custom backend server)
+// Run 100% locally in-browser via HuggingFace CDN cache (no custom backend server)
 env.allowLocalModels = false;
 
+const MODEL_CONFIGS = {
+  moonshine: {
+    id: "onnx-community/moonshine-tiny-ONNX",
+    label: "Moonshine Tiny",
+    webgpuDtype: { encoder_model: "fp32", decoder_model_merged: "q4" },
+    wasmDtype: "q8",
+  },
+  whisper: {
+    id: "onnx-community/whisper-tiny.en",
+    label: "Whisper Tiny.en",
+    webgpuDtype: { encoder_model: "fp32", decoder_model_merged: "q4" },
+    wasmDtype: "q8",
+  },
+};
+
 let transcriber = null;
+let loadedKey = null;
 let activeDevice = "wasm";
 
-async function detectDevice() {
+async function hasWebGPU() {
   if (typeof navigator !== "undefined" && "gpu" in navigator) {
     try {
       const adapter = await navigator.gpu.requestAdapter();
-      if (adapter) return "webgpu";
+      return Boolean(adapter);
     } catch {
-      // Fallback to WASM CPU
+      return false;
     }
   }
-  return "wasm";
+  return false;
 }
 
-async function initWhisper(modelId = "onnx-community/whisper-tiny.en") {
-  if (transcriber) {
-    self.postMessage({ type: "READY", device: activeDevice, modelId });
+async function initModel(modelKey = "moonshine") {
+  const key = MODEL_CONFIGS[modelKey] ? modelKey : "moonshine";
+  if (transcriber && loadedKey === key) {
+    self.postMessage({ type: "READY", device: activeDevice, modelKey: key });
     return;
   }
 
-  activeDevice = await detectDevice();
+  const cfg = MODEL_CONFIGS[key];
+  const progress_callback = (info) => {
+    if (info && typeof info.progress === "number") {
+      self.postMessage({
+        type: "PROGRESS",
+        progress: info.progress,
+        file: info.file || "",
+        label: cfg.label,
+      });
+    }
+  };
+
+  // Prefer WebGPU when supported, with automatic fallback to quantized WASM
+  const gpuAvailable = await hasWebGPU();
+  if (gpuAvailable) {
+    try {
+      activeDevice = "webgpu";
+      self.postMessage({
+        type: "STATUS",
+        text: `Loading ${cfg.label} on WebGPU…`,
+      });
+      transcriber = await pipeline("automatic-speech-recognition", cfg.id, {
+        device: "webgpu",
+        dtype: cfg.webgpuDtype,
+        progress_callback,
+      });
+      loadedKey = key;
+      self.postMessage({ type: "READY", device: activeDevice, modelKey: key });
+      return;
+    } catch (gpuErr) {
+      self.postMessage({
+        type: "STATUS",
+        text: `WebGPU fallback to WASM (${gpuErr?.message || "unsupported op"})…`,
+      });
+    }
+  }
+
+  activeDevice = "wasm";
   self.postMessage({
     type: "STATUS",
-    text: `Loading ${modelId} on ${activeDevice.toUpperCase()}…`,
+    text: `Loading ${cfg.label} on WASM…`,
   });
-
-  transcriber = await pipeline("automatic-speech-recognition", modelId, {
-    device: activeDevice,
-    dtype: activeDevice === "webgpu" ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
-    progress_callback: (info) => {
-      if (info && typeof info.progress === "number") {
-        self.postMessage({
-          type: "PROGRESS",
-          progress: info.progress,
-          file: info.file || "",
-        });
-      }
-    },
+  transcriber = await pipeline("automatic-speech-recognition", cfg.id, {
+    device: "wasm",
+    dtype: cfg.wasmDtype,
+    progress_callback,
   });
-
-  self.postMessage({ type: "READY", device: activeDevice, modelId });
+  loadedKey = key;
+  self.postMessage({ type: "READY", device: activeDevice, modelKey: key });
 }
 
-function isWhisperHallucination(text) {
+function isHallucination(text) {
   const cleaned = text.trim().toLowerCase();
   if (!cleaned || cleaned.length < 2) return true;
-  if (/^[\[\(].*[\]\)]$/.test(cleaned)) return true; // [BLANK_AUDIO], (music), (laughter)
-  const hallucinations = new Set([
+  if (/^[\[\(].*[\]\)]$/.test(cleaned)) return true; // [BLANK_AUDIO], (music), (silence)
+  const noise = new Set([
     "thank you.",
     "thank you",
     "thanks for watching.",
@@ -61,31 +106,36 @@ function isWhisperHallucination(text) {
     "bye",
     "hmm",
     "uh",
+    "um",
+    "oh",
+    "okay.",
+    "the",
+    "a",
   ]);
-  return hallucinations.has(cleaned);
+  return noise.has(cleaned);
 }
 
 self.onmessage = async (event) => {
-  const { type, audio, modelId } = event.data || {};
+  const { type, audio, modelKey } = event.data || {};
   try {
     if (type === "INIT") {
-      await initWhisper(modelId);
+      await initModel(modelKey || "moonshine");
     } else if (type === "TRANSCRIBE") {
-      if (!transcriber) {
-        await initWhisper(modelId);
+      const targetKey = modelKey || loadedKey || "moonshine";
+      if (!transcriber || loadedKey !== targetKey) {
+        await initModel(targetKey);
       }
+
       const t0 = performance.now();
-      const result = await transcriber(audio, {
-        language: "english",
-        task: "transcribe",
-        chunk_length_s: 15,
-        stride_length_s: 2,
-      });
+      // IMPORTANT: Never pass `language` or `task` to English-only models (moonshine-tiny / whisper-tiny.en)
+      const result = await transcriber(audio);
       const text = (result?.text || "").trim();
-      if (!isWhisperHallucination(text)) {
+
+      if (!isHallucination(text)) {
         self.postMessage({
           type: "TRANSCRIPT",
           text,
+          modelKey: loadedKey,
           latencyMs: Math.round(performance.now() - t0),
         });
       } else {

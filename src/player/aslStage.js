@@ -74,10 +74,10 @@ export class ASLStagePlayer {
     this.lastTickTime = now;
     this.accumulator += dt;
 
-    // Adaptive backpressure: speed up gently if live speech queue falls behind
+    // Adaptive backpressure: speed up tightly if live speech queue builds up
     const remaining = this.activeIndex >= 0 ? this.items.length - this.activeIndex : 0;
-    const pressureBoost = remaining > 10 ? 1.4 : remaining > 5 ? 1.2 : 1.0;
-    const effectiveSpeed = Math.min(2.0, this.speed * pressureBoost);
+    const pressureBoost = remaining > 6 ? 1.75 : remaining > 3 ? 1.45 : remaining > 1 ? 1.15 : 1.0;
+    const effectiveSpeed = Math.min(2.2, this.speed * pressureBoost);
 
     const targetFrameMs = FRAME_MS / effectiveSpeed;
     while (this.accumulator >= targetFrameMs) {
