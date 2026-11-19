@@ -1,0 +1,23 @@
+{
+  "name": "openasl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source WebAI Text-to-ASL interpreter rendering MediaPipe ASL pose sequences and fingerspelling live on HTML5 Canvas.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/build_manifest.mjs && vite build",
+    "preview": "vite preview",
+    "build:manifest": "node scripts/build_manifest.mjs",
+    "fetch:alphabet": "python3 scripts/fetch_alphabet.py",
+    "fetch:poses": "uv run --with pyarrow --with numpy python3 scripts/fetch_wlasl_poses.py"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
+    "@mlc-ai/web-llm": "^0.2.89",
+    "compromise": "^14.20.0"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
+}

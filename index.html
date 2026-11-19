@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenASL — Real-Time Speech-to-ASL Virtual Webcam</title>
+    <meta
+      name="description"
+      content="Open-source WebAI Speech-to-ASL virtual webcam app translating live speech into ASL Time-Topic-Comment gloss and animating real Deaf-signer poses in the bottom-right corner."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/styles/main.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">ASL</span>
+        <div>
+          <h1 class="brand-title">OpenASL</h1>
+          <p class="brand-subtitle">Real-Time Speech-to-ASL · Live Webcam PiP &amp; Virtual Camera</p>
+        </div>
+      </div>
+
+      <div class="header-meta">
+        <span id="assetStatusBadge" class="meta-stat">Loading assets…</span>
+        <span id="webgpuBadge" class="meta-stat">Checking WebGPU…</span>
+        <span id="vcamStatusBadge" class="meta-stat">Virtual Cam Off</span>
+      </div>
+    </header>
+
+    <main class="studio-layout">
+      <!-- Primary Stage + Live Webcam Column -->
+      <section class="stage-panel" aria-label="ASL Playback & Webcam Stage">
+        <!-- Hidden video element holding physical webcam stream for canvas compositing -->
+        <video id="webcamSource" playsinline muted hidden></video>
+
+        <!-- Live Controls Strip -->
+        <div class="live-toolbar">
+          <div class="live-group">
+            <button id="micToggleBtn" type="button" class="btn btn-primary">
+              Start Mic
+            </button>
+            <select id="sttEngineSelect" class="compact-select" aria-label="Speech recognition engine">
+              <option value="whisper">Whisper WebAI (Offline)</option>
+              <option value="webspeech">Web Speech API (Instant)</option>
+            </select>
+            <div class="mic-meter" aria-hidden="true">
+              <div id="micLevelFill" class="mic-meter-fill"></div>
+            </div>
+          </div>
+
+          <div class="live-group">
+            <button id="webcamToggleBtn" type="button" class="btn btn-secondary">
+              Enable Webcam PiP
+            </button>
+            <button id="vcamToggleBtn" type="button" class="btn btn-secondary">
+              Stream Virtual Cam
+            </button>
+          </div>
+        </div>
+
+        <div class="live-transcript-bar" aria-live="polite">
+          <span id="sttStatusText" class="stt-status">Mic Off</span>
+          <span id="liveTranscriptText" class="stt-transcript">
+            Click Start Mic to translate live speech, or type below.
+          </span>
+        </div>
+
+        <div class="canvas-frame">
+          <canvas
+            id="aslStageCanvas"
+            width="1280"
+            height="720"
+            aria-label="ASL Sign Playback and Virtual Webcam Canvas"
+          ></canvas>
+        </div>
+
+        <div class="transport-bar">
+          <div class="transport-actions">
+            <button id="playPauseBtn" type="button" class="btn btn-secondary" disabled>
+              Play
+            </button>
+            <button id="replayBtn" type="button" class="btn btn-secondary" disabled>
+              Replay
+            </button>
+            <label class="toggle-control" for="loopToggle">
+              <input id="loopToggle" type="checkbox" />
+              <span>Loop</span>
+            </label>
+          </div>
+
+          <div class="speed-control">
+            <label for="speedSlider">Speed</label>
+            <input
+              id="speedSlider"
+              type="range"
+              min="0.6"
+              max="1.6"
+              step="0.1"
+              value="1.0"
+            />
+            <span id="speedValue" class="mono-value">1.0x</span>
+          </div>
+        </div>
+
+        <div class="timeline-section">
+          <div class="section-header">
+            <h2>ASL Gloss Sequence</h2>
+            <span id="glossSummary" class="section-hint">Click any sign to jump</span>
+          </div>
+          <div id="glossTimeline" class="gloss-timeline" role="list">
+            <p class="empty-hint">Your translated ASL gloss tokens will appear here.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Controls & WebAI NLP Rail -->
+      <aside class="control-rail" aria-label="Translation Controls">
+        <form id="translateForm" class="input-block">
+          <div class="section-header">
+            <label for="englishInput" class="block-label">Text Input (Manual Test)</label>
+            <span class="section-hint">Ctrl/Cmd + Enter to sign</span>
+          </div>
+
+          <textarea
+            id="englishInput"
+            rows="3"
+            placeholder="e.g. Where did you buy that coffee yesterday?"
+          >man i went to work on that project last night, it was so fucking tough</textarea>
+
+          <div class="preset-row" aria-label="Example phrases">
+            <button
+              type="button"
+              class="preset-chip"
+              data-phrase="man i went to work on that project last night, it was so fucking tough"
+            >
+              Last night's project
+            </button>
+            <button
+              type="button"
+              class="preset-chip"
+              data-phrase="Where did you buy that coffee yesterday?"
+            >
+              Coffee yesterday?
+            </button>
+            <button
+              type="button"
+              class="preset-chip"
+              data-phrase="Hello, my name is Maya."
+            >
+              Hello, Maya
+            </button>
+            <button
+              type="button"
+              class="preset-chip"
+              data-phrase="I am going to the library tomorrow."
+            >
+              Library tomorrow
+            </button>
+          </div>
+
+          <button id="translateBtn" type="submit" class="btn btn-primary btn-full">
+            Translate &amp; Sign
+          </button>
+        </form>
+
+        <section class="rail-section" aria-label="WebAI Grammar Engine">
+          <div class="section-header">
+            <h2>WebAI Grammar Engine</h2>
+            <span id="engineLatency" class="mono-value"></span>
+          </div>
+
+          <div class="engine-selector">
+            <label class="radio-card" for="modeRule">
+              <input
+                id="modeRule"
+                type="radio"
+                name="nlpMode"
+                value="rule"
+                checked
+              />
+              <div>
+                <strong>Heuristic Gloss (Instant)</strong>
+                <p>In-browser Time-Topic-Comment parser via compromise.js</p>
+              </div>
+            </label>
+
+            <label class="radio-card" for="modeWebLLM">
+              <input
+                id="modeWebLLM"
+                type="radio"
+                name="nlpMode"
+                value="webllm"
+              />
+              <div>
+                <strong>Local WebGPU LLM</strong>
+                <p>Runs locally in browser via WebLLM (no server APIs)</p>
+              </div>
+            </label>
+          </div>
+
+          <div id="webllmPanel" class="webllm-panel" hidden>
+            <div class="webllm-row">
+              <select id="webllmModelSelect" aria-label="Select WebGPU LLM model"></select>
+              <button id="loadWebLLMBtn" type="button" class="btn btn-secondary">
+                Load Model
+              </button>
+            </div>
+            <div id="webllmProgressWrap" class="progress-wrap" hidden>
+              <div class="progress-track">
+                <div id="webllmProgressBar" class="progress-fill"></div>
+              </div>
+              <p id="webllmStatusText" class="progress-text">Initializing WebGPU…</p>
+            </div>
+          </div>
+
+          <div id="grammarBreakdown" class="breakdown-grid" aria-live="polite">
+            <div class="breakdown-row">
+              <span class="slot-key">Time</span>
+              <span id="slotTime" class="slot-val">—</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="slot-key">Topic</span>
+              <span id="slotTopic" class="slot-val">—</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="slot-key">Comment</span>
+              <span id="slotComment" class="slot-val">—</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="slot-key">Neg / WH</span>
+              <span id="slotEnd" class="slot-val">—</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="slot-key">Dropped</span>
+              <span id="slotDropped" class="slot-val muted">—</span>
+            </div>
+          </div>
+        </section>
+
+        <details class="rail-section pose-drop-section">
+          <summary class="pose-drop-summary">
+            <span>Pose JSON Preview</span>
+            <span class="section-hint">Test custom .json</span>
+          </summary>
+
+          <div class="pose-drop-body">
+            <p class="pose-note">
+              Drop any extracted MediaPipe pose <code>.json</code> file here to preview it
+              live on the canvas rig.
+            </p>
+
+            <div class="pose-inputs">
+              <input
+                id="poseGlossInput"
+                type="text"
+                placeholder="Optional gloss override (e.g. HELLO)"
+                aria-label="Optional gloss name for pose JSON"
+              />
+              <label id="poseDropzone" class="dropzone" for="poseFileInput">
+                <input id="poseFileInput" type="file" accept=".json" hidden />
+                <span>Choose or drop a pose .json file</span>
+              </label>
+            </div>
+
+            <ul id="localPoseList" class="override-list"></ul>
+          </div>
+        </details>
+      </aside>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
