@@ -36,8 +36,8 @@
     <main class="studio-layout">
       <!-- Primary Stage + Live Webcam Column -->
       <section class="stage-panel" aria-label="ASL Playback & Webcam Stage">
-        <!-- Hidden video element holding physical webcam stream for canvas compositing -->
-        <video id="webcamSource" playsinline muted hidden></video>
+        <!-- Non-hidden 2x2 video so Chromium never suspends the hardware webcam decoder -->
+        <video id="webcamSource" class="sr-video" playsinline muted autoplay></video>
 
         <!-- Live Controls Strip -->
         <div class="live-toolbar">
@@ -46,8 +46,8 @@
               Start Mic
             </button>
             <select id="sttEngineSelect" class="compact-select" aria-label="Speech recognition engine">
-              <option value="moonshine" selected>Moonshine WebAI (Fast Offline)</option>
-              <option value="webspeech">Web Speech (Instant Stream)</option>
+              <option value="webspeech" selected>Web Speech (Instant Stream)</option>
+              <option value="moonshine">Moonshine WebAI (Fast Offline)</option>
               <option value="whisper">Whisper Tiny.en (Offline)</option>
             </select>
             <div class="mic-meter" aria-hidden="true">

@@ -77,11 +77,15 @@ const speechController = new SpeechController({
     els.micLevelFill.style.width = `${Math.round(lvl * 100)}%`;
   },
   onTranscript: async (text, meta) => {
-    els.liveTranscriptText.textContent = `"${text}" (${meta.engine}${
-      meta.latencyMs ? ` · ${meta.latencyMs}ms` : ""
-    })`;
-    els.englishInput.value = text;
-    await runTranslation({ append: true, overrideText: text });
+    try {
+      els.liveTranscriptText.textContent = `"${text}" (${meta.engine}${
+        meta.latencyMs ? ` · ${meta.latencyMs}ms` : ""
+      })`;
+      els.englishInput.value = text;
+      await runTranslation({ append: true, overrideText: text });
+    } catch (err) {
+      console.error("[OpenASL] Translation error recovered:", err);
+    }
   },
 });
 
@@ -370,6 +374,7 @@ async function bootstrap() {
   if (!SpeechController.hasWebSpeech()) {
     const wsOpt = els.sttEngineSelect.querySelector('option[value="webspeech"]');
     if (wsOpt) wsOpt.disabled = true;
+    els.sttEngineSelect.value = "moonshine";
   }
 
   const [assetSummary, gpuStatus] = await Promise.all([

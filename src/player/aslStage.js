@@ -41,6 +41,7 @@ export class ASLStagePlayer {
     this.rafId = null;
     this.lastTickTime = 0;
     this.accumulator = 0;
+    this._queueLock = Promise.resolve();
   }
 
   setWebcamVideo(videoEl) {
@@ -56,8 +57,13 @@ export class ASLStagePlayer {
     if (this.rafId !== null) return;
     this.lastTickTime = performance.now();
     const step = (now) => {
-      this.stepClock(now);
+      // Schedule next frame FIRST so a single bad frame can NEVER freeze the webcam or stage
       this.rafId = requestAnimationFrame(step);
+      try {
+        this.stepClock(now);
+      } catch (err) {
+        console.error("[OpenASL Stage] Frame error recovered:", err);
+      }
     };
     this.rafId = requestAnimationFrame(step);
   }
@@ -66,7 +72,11 @@ export class ASLStagePlayer {
    * Can be invoked from a background Web Worker timer when the tab is minimized behind Zoom/Teams.
    */
   tickExternal() {
-    this.stepClock(performance.now());
+    try {
+      this.stepClock(performance.now());
+    } catch (err) {
+      console.error("[OpenASL Stage] External tick recovered:", err);
+    }
   }
 
   stepClock(now) {
@@ -80,10 +90,13 @@ export class ASLStagePlayer {
     const effectiveSpeed = Math.min(2.2, this.speed * pressureBoost);
 
     const targetFrameMs = FRAME_MS / effectiveSpeed;
-    while (this.accumulator >= targetFrameMs) {
+    let steps = 0;
+    while (this.accumulator >= targetFrameMs && steps < 4) {
       this.advanceState();
       this.accumulator -= targetFrameMs;
+      steps++;
     }
+    if (steps >= 4) this.accumulator = 0;
 
     this.renderFrame();
   }
@@ -98,22 +111,24 @@ export class ASLStagePlayer {
   async resolveTokens(tokens) {
     const resolved = [];
     for (const rawToken of tokens) {
-      const gloss = rawToken.toUpperCase().trim();
+      const gloss = String(rawToken || "").toUpperCase().trim();
       if (!gloss) continue;
 
       const poseEntry = this.assets.resolvePoseEntry(gloss);
       if (poseEntry) {
         try {
           const poseData = await this.assets.loadPoseData(poseEntry);
-          resolved.push({
-            type: "POSE",
-            gloss,
-            canonical: poseEntry.canonical,
-            isOverride: poseEntry.isOverride,
-            frames: poseData.frames,
-            source: poseData.source || "MediaPipe Pose",
-          });
-          continue;
+          if (poseData?.frames?.length > 0) {
+            resolved.push({
+              type: "POSE",
+              gloss,
+              canonical: poseEntry.canonical,
+              isOverride: poseEntry.isOverride,
+              frames: poseData.frames,
+              source: poseData.source || "MediaPipe Pose",
+            });
+            continue;
+          }
         } catch (err) {
           console.warn(`Pose JSON failed for ${gloss}, falling back to fingerspelling:`, err);
         }
@@ -131,52 +146,63 @@ export class ASLStagePlayer {
     return resolved;
   }
 
-  async setTokens(tokens) {
-    const resolved = await this.resolveTokens(tokens);
-    this.items = resolved;
-    this.prevPoseFrame = null;
-    this.transitionFramesLeft = 0;
-
-    if (this.items.length > 0) {
-      this.idleFrames = 0;
-      this.seekToToken(0, true);
-    } else {
-      this.activeIndex = -1;
-      this.isPlaying = false;
-      this.notify();
-    }
-    return this.items;
-  }
-
-  /**
-   * Queue mode for continuous live speech: appends newly spoken gloss tokens without cutting off
-   * the currently playing sign.
-   */
-  async appendTokens(tokens) {
-    const resolved = await this.resolveTokens(tokens);
-    if (resolved.length === 0) return this.items;
-
-    const wasIdle = !this.isPlaying || this.activeIndex < 0 || this.activeIndex >= this.items.length;
-
-    if (wasIdle) {
-      // Start fresh queue for the new spoken utterance
+  setTokens(tokens) {
+    const task = this._queueLock.then(async () => {
+      const resolved = await this.resolveTokens(tokens);
       this.items = resolved;
       this.prevPoseFrame = null;
       this.transitionFramesLeft = 0;
-      this.idleFrames = 0;
-      this.seekToToken(0, true);
-    } else {
-      this.items.push(...resolved);
-      // Trim already-played history so timeline stays concise during long calls
-      if (this.activeIndex > 12) {
-        const trim = this.activeIndex - 6;
-        this.items.splice(0, trim);
-        this.activeIndex -= trim;
+      this.charIndex = 0;
+      this.frameInStep = 0;
+
+      if (this.items.length > 0) {
+        this.idleFrames = 0;
+        this.seekToToken(0, true);
+      } else {
+        this.activeIndex = -1;
+        this.isPlaying = false;
+        this.notify();
       }
-      this.idleFrames = 0;
-      this.notify();
-    }
-    return this.items;
+      return this.items;
+    });
+    this._queueLock = task.catch(() => {});
+    return task;
+  }
+
+  /**
+   * Serialized queue mode for continuous live speech: appends newly spoken gloss tokens
+   * without racing or cutting off the currently playing sign.
+   */
+  appendTokens(tokens) {
+    const task = this._queueLock.then(async () => {
+      const resolved = await this.resolveTokens(tokens);
+      if (resolved.length === 0) return this.items;
+
+      const wasIdle =
+        !this.isPlaying || this.activeIndex < 0 || this.activeIndex >= this.items.length;
+
+      if (wasIdle) {
+        this.items = resolved;
+        this.prevPoseFrame = null;
+        this.transitionFramesLeft = 0;
+        this.charIndex = 0;
+        this.frameInStep = 0;
+        this.idleFrames = 0;
+        this.seekToToken(0, true);
+      } else {
+        this.items.push(...resolved);
+        if (this.activeIndex > 12) {
+          const trim = this.activeIndex - 6;
+          this.items.splice(0, trim);
+          this.activeIndex = Math.max(0, this.activeIndex - trim);
+        }
+        this.idleFrames = 0;
+        this.notify();
+      }
+      return this.items;
+    });
+    this._queueLock = task.catch(() => {});
+    return task;
   }
 
   play() {
@@ -324,6 +350,9 @@ export class ASLStagePlayer {
 
   drawWebcamCover(ctx, W, H) {
     const v = this.webcamVideo;
+    if (v && v.srcObject && v.paused && !v.ended) {
+      v.play().catch(() => {});
+    }
     if (!v || v.readyState < 2 || !v.videoWidth || !v.videoHeight) {
       ctx.fillStyle = "#14171c";
       ctx.fillRect(0, 0, W, H);
@@ -417,14 +446,15 @@ export class ASLStagePlayer {
       this.drawTokenProgressBar(ctx, cardX, cardY, cardSize, item);
       this.drawHudPill(ctx, hudCenterX, hudCenterY, item.gloss, isWebcam);
     } else if (item.type === "FINGERSPELL") {
-      this.drawFingerspellAsset(ctx, item, cardX, cardY, cardSize);
+      const safeCharIdx = Math.min(Math.max(0, this.charIndex), item.letters.length - 1);
+      this.drawFingerspellAsset(ctx, item, cardX, cardY, cardSize, safeCharIdx);
       this.drawTokenProgressBar(ctx, cardX, cardY, cardSize, item);
       this.drawFingerspellHud(
         ctx,
         hudCenterX,
         hudCenterY,
         item.letters,
-        this.charIndex,
+        safeCharIdx,
         isWebcam
       );
     }
@@ -433,9 +463,10 @@ export class ASLStagePlayer {
     ctx.restore();
   }
 
-  drawFingerspellAsset(ctx, item, cardX, cardY, cardSize) {
-    const letter = item.letters[this.charIndex];
-    const prevLetter = this.charIndex > 0 ? item.letters[this.charIndex - 1] : null;
+  drawFingerspellAsset(ctx, item, cardX, cardY, cardSize, safeCharIdx) {
+    const letter = item.letters?.[safeCharIdx];
+    if (!letter) return;
+    const prevLetter = safeCharIdx > 0 ? item.letters[safeCharIdx - 1] : null;
     const img = this.assets.getLetterImage(letter);
     if (!img) return;
 

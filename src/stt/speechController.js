@@ -69,10 +69,13 @@ export class SpeechController {
     this.silenceStartMs = 0;
     this.burstStartMs = 0;
 
-    // Web Speech API streaming prefix tracker
+    // Web Speech API streaming prefix tracker + crash-proof auto-restart
     this.recognition = null;
     this.emittedWordsByResult = new Map();
     this.interimFlushTimer = null;
+    this.webSpeechRestartTimer = null;
+    this.webSpeechSessionId = 0;
+    this.webSpeechErrorCount = 0;
   }
 
   static hasWebSpeech() {
@@ -150,7 +153,9 @@ export class SpeechController {
   async start() {
     if (this.isListening) return;
     this.lastTailWord = "";
+    this.webSpeechErrorCount = 0;
     if (this.engine === "webspeech") {
+      this.isListening = true;
       this.startWebSpeechStreaming();
     } else {
       await this.startLocalWebAIMic(this.engine);
@@ -163,7 +168,9 @@ export class SpeechController {
     this.speechChunks = [];
     this.preRoll = [];
     this.pendingAudioChunks = [];
+    this.webSpeechSessionId++;
     clearTimeout(this.interimFlushTimer);
+    clearTimeout(this.webSpeechRestartTimer);
     this.emittedWordsByResult.clear();
     this.onLevel(0);
 
@@ -181,8 +188,11 @@ export class SpeechController {
     }
     if (this.recognition) {
       try {
+        this.recognition.onresult = null;
+        this.recognition.onerror = null;
         this.recognition.onend = null;
-        this.recognition.stop();
+        this.recognition.onstart = null;
+        this.recognition.abort();
       } catch {
         // Ignore
       }
@@ -320,46 +330,85 @@ export class SpeechController {
   }
 
   /**
-   * True real-time Web Speech streaming:
-   * Commits stable interim words mid-sentence (never waits 5s for isFinal!).
+   * True real-time Web Speech streaming with crash-proof auto-recovery:
+   * - Commits stable interim words mid-sentence (never waits 5s for isFinal).
+   * - Creates a fresh SpeechRecognition instance with backoff on Chrome session end/errors
+   *   so InvalidStateError or network hiccups can never kill the recognizer or freeze the tab.
    */
   startWebSpeechStreaming() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
+      this.isListening = false;
       this.onStatus("Web Speech API unavailable — switch to Moonshine WebAI.", "error");
       return;
     }
 
+    clearTimeout(this.interimFlushTimer);
+    clearTimeout(this.webSpeechRestartTimer);
+
+    if (this.recognition) {
+      try {
+        this.recognition.onresult = null;
+        this.recognition.onerror = null;
+        this.recognition.onend = null;
+        this.recognition.onstart = null;
+        this.recognition.abort();
+      } catch {
+        // Ignore
+      }
+      this.recognition = null;
+    }
+
+    const sessionId = ++this.webSpeechSessionId;
     this.emittedWordsByResult.clear();
+
     const rec = new SR();
     rec.lang = "en-US";
     rec.continuous = true;
     rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    const scheduleRestart = (delayMs, statusText) => {
+      if (!this.isListening || sessionId !== this.webSpeechSessionId) return;
+      clearTimeout(this.webSpeechRestartTimer);
+      if (statusText) this.onStatus(statusText, "loading");
+      this.webSpeechRestartTimer = setTimeout(() => {
+        if (this.isListening && sessionId === this.webSpeechSessionId) {
+          this.startWebSpeechStreaming();
+        }
+      }, delayMs);
+    };
 
     rec.onstart = () => {
-      this.isListening = true;
+      if (sessionId !== this.webSpeechSessionId) return;
       this.onStatus("Live Streaming · Web Speech", "ready");
     };
 
     const emitNewSlice = (resultIdx, words, forceAll) => {
+      if (!this.isListening || sessionId !== this.webSpeechSessionId) return;
       const alreadyEmitted = this.emittedWordsByResult.get(resultIdx) || 0;
-      // Hold back only the very last word while mid-utterance so half-heard words settle
       const commitUpTo = forceAll ? words.length : Math.max(alreadyEmitted, words.length - 1);
       const countToEmit = commitUpTo - alreadyEmitted;
 
       if (countToEmit <= 0) return;
-      // Emit immediately when we have a short phrase (2+ words) or forced flush
       if (!forceAll && countToEmit < 2) return;
 
       const slice = words.slice(alreadyEmitted, commitUpTo).join(" ").trim();
       this.emittedWordsByResult.set(resultIdx, commitUpTo);
       if (slice) {
-        this.onTranscript(slice, { engine: "webspeech", latencyMs: 0 });
+        try {
+          this.onTranscript(slice, { engine: "webspeech", latencyMs: 0 });
+        } catch (err) {
+          console.error("[OpenASL STT] Transcript callback error:", err);
+        }
       }
     };
 
     rec.onresult = (event) => {
+      if (sessionId !== this.webSpeechSessionId) return;
+      this.webSpeechErrorCount = 0; // Reset backoff on any healthy speech event
       clearTimeout(this.interimFlushTimer);
+
       let latestInterimIdx = -1;
       let latestWords = [];
 
@@ -380,7 +429,6 @@ export class SpeechController {
         }
       }
 
-      // If user pauses for 350ms mid-sentence, flush the held-back last word too
       if (latestInterimIdx >= 0 && latestWords.length > 0) {
         this.interimFlushTimer = setTimeout(() => {
           emitNewSlice(latestInterimIdx, latestWords, true);
@@ -389,23 +437,35 @@ export class SpeechController {
     };
 
     rec.onerror = (e) => {
-      if (e.error !== "no-speech") {
-        this.onStatus(`Web Speech error: ${e.error}`, "error");
+      if (sessionId !== this.webSpeechSessionId) return;
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        this.isListening = false;
+        this.onStatus("Mic permission blocked by browser.", "error");
+        return;
+      }
+      if (e.error !== "no-speech" && e.error !== "aborted") {
+        this.webSpeechErrorCount++;
+        this.onStatus(`Web Speech reconnecting (${e.error})…`, "loading");
       }
     };
 
     rec.onend = () => {
+      if (sessionId !== this.webSpeechSessionId) return;
+      clearTimeout(this.interimFlushTimer);
+      this.emittedWordsByResult.clear();
       if (this.isListening) {
-        this.emittedWordsByResult.clear();
-        try {
-          rec.start();
-        } catch {
-          // Ignore rapid restart
-        }
+        // Gentle backoff prevents Chrome InvalidStateError & tight crash loops
+        const delay = Math.min(2000, 260 * Math.pow(1.6, this.webSpeechErrorCount));
+        scheduleRestart(delay, this.webSpeechErrorCount > 0 ? "Reconnecting Web Speech…" : null);
       }
     };
 
     this.recognition = rec;
-    rec.start();
+    try {
+      rec.start();
+    } catch (err) {
+      this.webSpeechErrorCount++;
+      scheduleRestart(Math.min(2000, 350 * this.webSpeechErrorCount), "Restarting Web Speech…");
+    }
   }
 }

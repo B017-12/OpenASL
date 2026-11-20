@@ -1,6 +1,6 @@
 /**
  * Loads public/assets/manifest.json, preloads A-Z fingerspelling SVGs,
- * and caches MediaPipe Holistic pose JSON sequences (from Google asl-signs or local drop-in).
+ * and caches MediaPipe Holistic pose JSON sequences with in-flight deduplication.
  */
 
 function loadImage(src) {
@@ -17,7 +17,8 @@ export class ASLAssetStore {
     this.manifest = { letters: {}, poses: {}, aliases: {} };
     this.letterImages = new Map();
     this.poseCache = new Map();
-    this.localPoseOverrides = new Map(); // Local .json pose sequences dropped in for preview
+    this.inFlightPoses = new Map();
+    this.localPoseOverrides = new Map();
   }
 
   async init() {
@@ -47,11 +48,15 @@ export class ASLAssetStore {
   }
 
   getLetterImage(letter) {
+    if (typeof letter !== "string" || !letter) return null;
     return this.letterImages.get(letter.toUpperCase()) || null;
   }
 
   resolvePoseEntry(gloss) {
+    if (typeof gloss !== "string") return null;
     const key = gloss.toUpperCase().trim();
+    if (!key) return null;
+
     if (this.localPoseOverrides.has(key)) {
       return { canonical: key, data: this.localPoseOverrides.get(key), isOverride: true };
     }
@@ -74,22 +79,31 @@ export class ASLAssetStore {
     if (this.poseCache.has(entry.src)) {
       return this.poseCache.get(entry.src);
     }
+    if (this.inFlightPoses.has(entry.src)) {
+      return this.inFlightPoses.get(entry.src);
+    }
 
-    const resp = await fetch(entry.src);
-    if (!resp.ok) {
-      throw new Error(`Failed to load pose JSON: ${entry.src}`);
+    const promise = (async () => {
+      const resp = await fetch(entry.src);
+      if (!resp.ok) {
+        throw new Error(`Failed to load pose JSON: ${entry.src}`);
+      }
+      const data = await resp.json();
+      if (!Array.isArray(data.frames) || data.frames.length === 0) {
+        throw new Error(`Pose JSON has no frames: ${entry.src}`);
+      }
+      this.poseCache.set(entry.src, data);
+      return data;
+    })();
+
+    this.inFlightPoses.set(entry.src, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlightPoses.delete(entry.src);
     }
-    const data = await resp.json();
-    if (!Array.isArray(data.frames) || data.frames.length === 0) {
-      throw new Error(`Pose JSON has no frames: ${entry.src}`);
-    }
-    this.poseCache.set(entry.src, data);
-    return data;
   }
 
-  /**
-   * Registers a locally dropped pose JSON file (exported by extract_asl_signs.py) for preview.
-   */
   async registerLocalPoseFile(file, overrideGloss = "") {
     const text = await file.text();
     const parsed = JSON.parse(text);

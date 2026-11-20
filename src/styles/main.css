@@ -136,6 +136,16 @@ code {
   gap: 14px;
 }
 
+.sr-video {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0.001;
+  pointer-events: none;
+}
+
 .live-toolbar {
   display: flex;
   align-items: center;
