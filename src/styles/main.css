@@ -69,19 +69,15 @@ code {
   gap: 14px;
 }
 
-.brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.brand-logo {
+  display: block;
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: var(--accent-amber);
-  color: #111317;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 13px;
-  letter-spacing: 0.06em;
+  object-fit: contain;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  padding: 4px;
 }
 
 .brand-title {

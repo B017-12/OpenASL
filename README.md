@@ -1,54 +1,100 @@
-# OpenASL
+<p align="center">
+  <img src="public/assets/branding/OpenASL_Logo.png" alt="OpenASL" width="440" />
+</p>
 
-Open-source **Real-Time WebAI Speech-to-ASL Virtual Webcam** built for accessible online communication (Zoom, Teams, Google Meet, Discord, Omegle).
+<p align="center">
+  <strong>Real-Time WebAI Speech-to-ASL Virtual Webcam for Accessible Video Calls</strong>
+</p>
 
-**Zero AI-Generated Visuals · Zero Pre-Rendered Video Dependencies · Zero OBS Required:**
-- **100% In-Browser WebAI Speech-to-Text:** Offline Whisper (`@huggingface/transformers` on WebGPU/WASM in a Web Worker + RMS VAD clause chunking) + instant Web Speech API fallback.
-- **100% In-Browser WebAI ASL Grammar:** Instant (~2 ms) Time-Topic-Comment Gloss parser (`compromise.js`) + optional local WebGPU LLM (`@mlc-ai/web-llm`).
-- **Live `1280×720` HTML5 `<canvas>` Webcam + Bottom-Right ASL PiP:** Renders **257 real adult ASL MediaPipe Holistic pose sequences** with smooth joint-to-joint transitions and public-domain A–Z fingerspelling fallback.
-- **Zero-OBS Virtual Camera Output:** Bundles a lightweight virtual camera bridge (`bridge/virtualcam_bridge.py`) targeting **UnityCapture** (`UnityCaptureFilter64.dll`, ~250 KB, MIT-friendly) on Windows and `v4l2loopback` on Linux, plus an Electron wrapper (`electron/main.cjs` + `electron/installer.nsh`) for single-click desktop installation.
+<p align="center">
+  <img src="public/assets/branding/WebAI_Inside.png" alt="#WebAI Inside" height="44" />
+</p>
 
 ---
 
-## Quickstart (One-Click Windows Launcher)
+<h1 align="center">🚧 WORK IN PROGRESS — INCOMPLETE PROTOTYPE 🚧</h1>
 
-Double-click **`OpenASL-Start.exe`** in the repo folder (built from `launcher/main.go`). It automatically:
+> [!WARNING]
+> **OpenASL is actively under construction and is not yet feature-complete.**
+> Speech recognition, ASL grammar translation, pose vocabulary coverage, and desktop packaging are still evolving. Expect rough edges, missing signs (which currently fall back to fingerspelling), and rapid changes as we build toward a full release with community contributors.
+
+---
+
+## About OpenASL
+
+**OpenASL** is a free, open-source **real-time Speech-to-ASL Virtual Webcam** built to make everyday online conversations on **Zoom, Microsoft Teams, Google Meet, Discord, and browser video chats** more accessible for Deaf and Hard-of-Hearing people.
+
+When you speak into your microphone, OpenASL translates spoken English into **American Sign Language (ASL) Time-Topic-Comment grammar** and composites a live animated ASL signer in the **bottom-right corner of your webcam feed**, outputting it directly as a system-level PC virtual webcam — **with zero OBS Studio required, zero cloud API fees, and zero AI-generated sign visuals.**
+
+- **Authentic Human Motion (Zero AI-Generated Visuals):** Signs are driven by real Deaf-signer MediaPipe Holistic motion-capture landmarks rendered live at 30 FPS on HTML5 `<canvas>`, with public-domain A–Z fingerspelling fallback for proper nouns and uncommon words.
+- **100% On-Device Privacy:** Audio transcription, grammar translation, and video compositing run directly on your machine inside the browser.
+- **Zero-OBS Virtual Camera:** Outputs directly to a lightweight system virtual camera driver (`UnityCapture` on Windows / `v4l2loopback` on Linux) rather than forcing users to install OBS.
+
+---
+
+## 🤝 TBD — Roadmap (With Community Assistance)
+
+OpenASL is built for the Deaf and Hard-of-Hearing community, and we want real signers, volunteer artists, and native speakers to help shape what comes next:
+
+1. **Authentic ASL Profanity & Everyday Slang Signs**
+   Academic ASL datasets are almost exclusively PG-only — yet swearing, banter, and informal slang are a completely normal part of how good friends talk. Deaf and Hard-of-Hearing people deserve the exact same freedom of expression as anyone else, without being artificially censored or forced to fingerspell everyday cuss words.
+2. **FinnSL & FinnSSL Support (Finland)**
+   Dedicated lexicon, grammar rules, and native pose packs for **Finnish Sign Language (FinnSL / *Suomalainen viittomakieli*)** and **Finland-Swedish Sign Language (FinnSSL / *Finlandssvenskt teckenspråk*)** for Finnish users.
+3. **Additional Sign Languages (Community-Requested)**
+   Expanding OpenASL's modular gloss + pose-pack architecture to support **BSL, Auslan, LSF, DGS, ISL**, and any other regional or national sign languages requested and contributed by the community.
+
+*Want to help record missing signs, contribute human-crafted animations, or bring your local sign language to OpenASL? Open an Issue or Pull Request!*
+
+---
+
+## <img src="public/assets/branding/WebAI_Inside.png" alt="#WebAI Inside" height="28" align="absmiddle" /> — How OpenASL Uses WebAI
+
+Everything that powers the intelligence of OpenASL runs **directly inside the browser** using modern WebAI runtimes (WebGPU + WebAssembly) — no paid API keys, no remote inference servers:
+
+| Stage | WebAI Technology | How It's Used |
+| :--- | :--- | :--- |
+| **Offline Speech-to-Text** | [`@huggingface/transformers`](https://huggingface.co/docs/transformers.js) (`Moonshine Tiny` & `Whisper Tiny.en`) | Runs inside a dedicated **Web Worker** on **WebGPU** (with automatic **WASM** fallback) with an adaptive-noise-floor VAD that streams live speech bursts in real time. |
+| **Instant Streaming STT** | Browser **Web Speech API** | Zero-download streaming option with mid-sentence word committing and automatic crash/reconnect recovery. |
+| **ASL Grammar Translation** | [`compromise`](https://github.com/spencermountain/compromise) + [`@mlc-ai/web-llm`](https://github.com/mlc-ai/web-llm) | Instant (~2 ms) Time-Topic-Comment gloss engine in JS, plus an optional **local WebGPU LLM** (`SmolLM2-360M` / `Llama-3.2-1B`) running 100% client-side. |
+| **Live Pose & Webcam Compositing** | **HTML5 `<canvas>`** (30 FPS) + Background Web Worker Timer | Renders **257 real adult WLASL MediaPipe Holistic pose sequences** with smooth cubic-eased joint interpolation, A–Z fingerspelling with double-letter bounce, and live mirrored webcam PiP compositing. |
+
+---
+
+## Quickstart
+
+### Option 1: One-Click Windows Launcher (Temporary Dev Binary)
+
+Double-click **`OpenASL-Start.exe`** in the repo folder (built from [`launcher/main.go`](launcher/main.go)). It automatically:
 1. Runs `npm install` (if needed).
-2. Creates an isolated `bridge/.venv` and installs virtual camera dependencies (`pyvirtualcam`, `websockets`, `opencv-python-headless`).
-3. Offers to register the zero-OBS `UnityCaptureFilter64.dll` virtual webcam driver on first run.
-4. Starts both the Virtual Camera Bridge and the WebAI frontend, and opens `http://localhost:5173` in your browser.
+2. Creates an isolated `bridge/.venv` and installs virtual camera dependencies (`pyvirtualcam`, `websockets`, `opencv-python-headless`, `numpy`).
+3. Prompts once to register the zero-OBS `UnityCaptureFilter64.dll` virtual webcam driver.
+4. Starts both the Virtual Camera Bridge and the WebAI frontend, and opens `http://localhost:5173` automatically.
 
----
+### Option 2: Manual Setup (Dev)
 
-## Manual Quickstart (Dev)
-
-### 1. Start the WebAI App
 ```bash
+# 1. Start the WebAI Frontend
 npm install
 npm run dev
 ```
-Open the local URL in Chrome/Edge:
-- Click **Start Mic** to transcribe live speech into ASL.
-- Click **Enable Webcam PiP** to composite the ASL pose rig in the bottom-right corner of your live webcam feed.
 
-### 2. Enable System-Level Virtual Webcam (Zero OBS)
-
-**Windows (one-time driver registration, Administrator PowerShell):**
-```powershell
-powershell -ExecutionPolicy Bypass -File bridge\install_windows_vcam.ps1
-```
-
-**Linux:**
-```bash
-bash bridge/setup_linux_vcam.sh
-```
+**Enable System-Level Virtual Webcam (Zero OBS):**
+- **Windows (one-time, Administrator PowerShell):**
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File bridge\install_windows_vcam.ps1
+  ```
+- **Linux:**
+  ```bash
+  bash bridge/setup_linux_vcam.sh
+  ```
 
 **Start the Virtual Camera Bridge:**
 ```bash
 pip install -r bridge/requirements.txt
 python3 bridge/virtualcam_bridge.py
 ```
-Then click **Stream Virtual Cam** in OpenASL and select **Unity Video Capture** (Windows) or **OpenASL Camera** (Linux) inside Zoom, Teams, Discord, or your browser.
+
+Click **Start Mic**, **Enable Webcam PiP**, and **Stream Virtual Cam** in OpenASL, then select **Unity Video Capture** (Windows) or **OpenASL Camera** (Linux) inside Zoom, Teams, Discord, or your browser.
 
 ---
 
@@ -63,5 +109,5 @@ uv run --with pyarrow --with numpy python3 scripts/fetch_wlasl_poses.py --all
 ```
 
 ### Dataset Attribution
-- **Adult Word Pose Landmarks:** Derived from **WLASL** via [`Kibalama/poseformer-sign-language`](https://huggingface.co/datasets/Kibalama/poseformer-sign-language) (C-UDA — academic / non-commercial computational use).
+- **Adult Word Pose Landmarks:** Derived from **WLASL** via [`Kibalama/poseformer-sign-language`](https://huggingface.co/datasets/Kibalama/poseformer-sign-language) (Computational Use of Data Agreement, C-UDA — academic / non-commercial computational use).
 - **Manual Alphabet (A–Z):** Public-domain SVG illustrations sourced from Wikimedia Commons (`Category:ASL_letters`).
