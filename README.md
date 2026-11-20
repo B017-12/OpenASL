@@ -24,11 +24,11 @@
 
 **OpenASL** is a free, open-source **real-time Speech-to-ASL Virtual Webcam** built to make everyday online conversations on **Zoom, Microsoft Teams, Google Meet, Discord, and browser video chats** more accessible for Deaf and Hard-of-Hearing people.
 
-When you speak into your microphone, OpenASL translates spoken English into **American Sign Language (ASL) Time-Topic-Comment grammar** and composites a live animated ASL signer in the **bottom-right corner of your webcam feed**, outputting it directly as a system-level PC virtual webcam — **with zero OBS Studio required, zero cloud API fees, and zero AI-generated sign visuals.**
+When you speak into your microphone, OpenASL translates spoken English into **American Sign Language (ASL) Time-Topic-Comment grammar** and composites a live animated ASL signer in the **bottom-right corner of your webcam feed**, outputting it directly as a system-level PC virtual webcam — **free, 100% on-device, and with zero AI-generated sign visuals.**
 
 - **Authentic Human Motion (Zero AI-Generated Visuals):** Signs are driven by real Deaf-signer MediaPipe Holistic motion-capture landmarks rendered live at 30 FPS on HTML5 `<canvas>`, with public-domain A–Z fingerspelling fallback for proper nouns and uncommon words.
 - **100% On-Device Privacy:** Audio transcription, grammar translation, and video compositing run directly on your machine inside the browser.
-- **Zero-OBS Virtual Camera:** Outputs directly to a lightweight system virtual camera driver (`UnityCapture` on Windows / `v4l2loopback` on Linux) rather than forcing users to install OBS.
+- **Plug-and-Play Virtual Camera:** Outputs directly to a lightweight system virtual camera driver (`UnityCapture` on Windows / `v4l2loopback` on Linux) ready for Zoom, Teams, Discord, and browser calls.
 
 ---
 
@@ -67,7 +67,7 @@ Everything that powers the intelligence of OpenASL runs **directly inside the br
 Double-click **`OpenASL-Start.exe`** in the repo folder (built from [`launcher/main.go`](launcher/main.go)). It automatically:
 1. Runs `npm install` (if needed).
 2. Creates an isolated `bridge/.venv` and installs virtual camera dependencies (`pyvirtualcam`, `websockets`, `opencv-python-headless`, `numpy`).
-3. Prompts once to register the zero-OBS `UnityCaptureFilter64.dll` virtual webcam driver.
+3. Prompts once to register the `UnityCaptureFilter64.dll` virtual webcam driver.
 4. Starts both the Virtual Camera Bridge and the WebAI frontend, and opens `http://localhost:5173` automatically.
 
 ### Option 2: Manual Setup (Dev)
@@ -78,7 +78,7 @@ npm install
 npm run dev
 ```
 
-**Enable System-Level Virtual Webcam (Zero OBS):**
+**Enable System-Level Virtual Webcam:**
 - **Windows (one-time, Administrator PowerShell):**
   ```powershell
   powershell -ExecutionPolicy Bypass -File bridge\install_windows_vcam.ps1
