@@ -36,14 +36,18 @@ When you speak into your microphone, OpenASL translates spoken English into **Am
 
 OpenASL is built for the Deaf and Hard-of-Hearing community, and we want real signers, volunteer artists, and native speakers to help shape what comes next:
 
-1. **Authentic ASL Profanity & Everyday Slang Signs**
+1. **Open-Source Sign-to-Voice Interpretation (Two-Way Communication)**
+   Real-time **Sign Language → Spoken Voice** conversion so hearing users can understand Deaf signers just as easily as Deaf users can understand hearing speakers. True accessibility has to work in both directions — without two-way interpretation, the tool is only half complete.
+2. **Community Hand-Drawn Sign Animations (Volunteer Artists Needed)**
+   While we currently render real MediaPipe landmark rigs to avoid AI-generated visuals, our long-term goal is a warm, expressive **open directory of hand-drawn Sign Language GIFs and animations**. As an open-source, non-commercial project, we unfortunately cannot pay contributors — but if you'd like to donate your time and talent out of the kindness of your heart, **every contributing artist will be prominently credited in both the animation directory and this repository**.
+3. **Authentic ASL Profanity & Everyday Slang Signs**
    Academic ASL datasets are almost exclusively PG-only — yet swearing, banter, and informal slang are a completely normal part of how good friends talk. Deaf and Hard-of-Hearing people deserve the exact same freedom of expression as anyone else, without being artificially censored or forced to fingerspell everyday cuss words.
-2. **FinnSL & FinnSSL Support (Finland)**
+4. **FinnSL & FinnSSL Support (Finland)**
    Dedicated lexicon, grammar rules, and native pose packs for **Finnish Sign Language (FinnSL / *Suomalainen viittomakieli*)** and **Finland-Swedish Sign Language (FinnSSL / *Finlandssvenskt teckenspråk*)** for Finnish users.
-3. **Additional Sign Languages (Community-Requested)**
+5. **Additional Sign Languages (Community-Requested)**
    Expanding OpenASL's modular gloss + pose-pack architecture to support **BSL, Auslan, LSF, DGS, ISL**, and any other regional or national sign languages requested and contributed by the community.
 
-*Want to help record missing signs, contribute human-crafted animations, or bring your local sign language to OpenASL? Open an Issue or Pull Request!*
+*Want to help record missing signs, donate hand-drawn animations, or bring your local sign language to OpenASL? Open an Issue or Pull Request!*
 
 ---
 
