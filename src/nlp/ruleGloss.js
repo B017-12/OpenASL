@@ -1,33 +1,34 @@
 import nlp from "compromise";
 
-const STOP_WORDS = new Set([
-  // Articles & determiners
-  "a", "an", "the", "that", "this", "these", "those",
-  // Copulas & auxiliaries
+/**
+ * Pure English grammatical glue that does NOT exist as a sign in ASL.
+ * IMPORTANT: Never put real ASL content words here (like, have, can, man, look, listen,
+ * on, in, with, from, about, this, that, must, should, will, just, well, etc.).
+ */
+const PURE_STOP_WORDS = new Set([
+  // English articles (ASL does not use a / an / the)
+  "a", "an", "the",
+  // Pure copula "to be" (ASL omits linking verbs: "I am tired" -> "I TIRED")
   "am", "is", "are", "was", "were", "be", "been", "being",
-  "do", "does", "did", "have", "has", "had",
-  "will", "would", "shall", "should", "can", "could", "may", "might", "must",
-  // Prepositions that drop in ASL spatial grammar
-  "to", "of", "at", "by", "for", "from", "with", "into", "onto", "on", "in", "about", "as",
-  // Conversational fillers & discourse markers
-  "uh", "um", "er", "ah", "oh", "ugh", "like", "just", "well", "yeah", "yep",
-  "actually", "basically", "literally", "honestly", "anyway", "so",
-  // Intensifier profanity (expressed non-manually / via REALLY in ASL, never fingerspelled)
-  "fucking", "fuckin", "freaking", "friggin", "damn", "hella", "totally", "super", "extremely", "very"
+  // Pure infinitive / genitive glue
+  "to", "of", "at",
+  // Pure hesitation noises
+  "uh", "um", "er", "ah", "hmm", "uhh", "umm",
 ]);
 
-// Words dropped only when used as sentence/clause-initial discourse vocatives ("man i went...", "bro...")
-const CLAUSE_INITIAL_FILLERS = new Set(["man", "bro", "dude", "yo", "guys", "listen", "look"]);
+// Auxiliaries dropped ONLY when followed by a verb/negation (e.g. "do not", "did you buy"),
+// NEVER when used as the main verb ("What do you do?" -> keep DO).
+const AUX_DO = new Set(["do", "does", "did"]);
 
-const INTENSIFIERS = new Set([
-  "so", "very", "really", "super", "extremely", "fucking", "fuckin", "freaking", "hella", "totally"
+const INTENSIFIER_PROFANITY = new Set([
+  "fucking", "fuckin", "freaking", "friggin", "damn", "hella",
 ]);
 
 const TIME_WORDS = new Set([
   "today", "tomorrow", "yesterday", "now", "later", "soon", "before", "after",
   "always", "sometimes", "morning", "afternoon", "evening", "night", "tonight",
   "week", "month", "year", "weekend", "past", "future",
-  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
 ]);
 
 const WH_WORDS = new Set(["who", "what", "where", "when", "why", "how", "which"]);
@@ -59,7 +60,7 @@ const PRONOUN_MAP = {
 
 const POSSESSIVES = new Set(["my", "your", "his", "her", "our", "their"]);
 
-// ASL maps many English synonyms to a single core sign (prevents unnecessary fingerspelling)
+// Map English synonyms to canonical ASL glosses so we sign instead of fingerspelling
 const ASL_SYNONYMS = {
   tough: "HARD",
   difficult: "HARD",
@@ -73,7 +74,6 @@ const ASL_SYNONYMS = {
   amazing: "GOOD",
   great: "GOOD",
   wonderful: "GOOD",
-  fine: "GOOD",
   awful: "BAD",
   terrible: "BAD",
   horrible: "BAD",
@@ -106,9 +106,20 @@ const ASL_SYNONYMS = {
   mommy: "MOTHER",
   dad: "FATHER",
   daddy: "FATHER",
+  yeah: "YES",
+  yep: "YES",
+  yup: "YES",
+  nope: "NO",
+  nah: "NO",
+  bro: "BROTHER",
+  dude: "MAN",
+  guys: "PEOPLE",
+  gonna: "FUTURE",
+  wanna: "WANT",
+  gotta: "NEED",
 };
 
-// Multi-word English phrases normalized before clause parsing
+// Multi-word English idioms & time expressions normalized before clause parsing
 const PHRASE_REWRITES = [
   [/\blast\s+night\b/gi, "YESTERDAY NIGHT"],
   [/\bthis\s+morning\b/gi, "TODAY MORNING"],
@@ -120,9 +131,9 @@ const PHRASE_REWRITES = [
   [/\bexcuse\s+me\b/gi, "EXCUSE"],
   [/\bice\s+cream\b/gi, "ICECREAM"],
   [/\bwork\s+on\b/gi, "WORK"],
-  // Strip intensifier profanity before compromise lemmatizes "fucking" -> "fuck"
+  // "so fucking tough" -> "REALLY tough" (keeps emphasis without dropping the adjective)
   [/\b(?:so\s+)?(?:fucking|fuckin|freaking|friggin|damn|hella)\b/gi, "REALLY"],
-  // Dummy pronoun "it is / it was / it's" -> drop "it"
+  // Dummy pronoun "it is / it was / it's" -> drop only the dummy "it is"
   [/\bit(?:'s|\s+is|\s+was|\s+were)\b/gi, ""],
 ];
 
@@ -133,7 +144,7 @@ function translateClause(clauseText) {
   const hasPastVerb = doc.has("#PastTense");
   const hasFutureModal = /\b(will|shall|FUTURE)\b/i.test(clauseText);
 
-  doc.verbs().toInfinitive();
+  doc.match("#Verb").not("#Modal").not("#Auxiliary").verbs().toInfinitive();
   doc.nouns().toSingular();
 
   const sentences = doc.json();
@@ -144,6 +155,13 @@ function translateClause(clauseText) {
     }
   }
 
+  // Check if clause has a non-auxiliary main verb so we know whether "do/did" is auxiliary or main verb
+  const hasOtherMainVerb = terms.some((t) => {
+    const w = (t.text || "").toLowerCase().replace(/[^a-z0-9_']/g, "");
+    const tags = new Set(t.tags || []);
+    return tags.has("Verb") && !tags.has("Copula") && !AUX_DO.has(w) && !PURE_STOP_WORDS.has(w);
+  });
+
   const timeSlot = [];
   const topicSlot = [];
   const commentSlot = [];
@@ -153,8 +171,6 @@ function translateClause(clauseText) {
 
   let seenVerb = false;
   let seenSubject = false;
-  let hasIntensifier = false;
-  let isClauseStart = true;
 
   for (let i = 0; i < terms.length; i++) {
     const term = terms[i];
@@ -164,22 +180,19 @@ function translateClause(clauseText) {
     let normalized = rawText.toLowerCase().replace(/[^a-z0-9_']/g, "");
     if (!normalized) continue;
 
-    // Strip clause-initial vocative fillers ("man", "bro", "dude")
-    if (isClauseStart && CLAUSE_INITIAL_FILLERS.has(normalized)) {
-      dropped.push(rawText);
-      continue;
-    }
-    isClauseStart = false;
-
-    // Collapse intensifier chains ("so fucking tough" -> intensifier flag -> REALLY)
-    if (INTENSIFIERS.has(normalized)) {
-      hasIntensifier = true;
+    if (PURE_STOP_WORDS.has(normalized)) {
       dropped.push(rawText);
       continue;
     }
 
-    if (STOP_WORDS.has(normalized) || normalized === "it") {
+    // Drop auxiliary do/does/did ONLY when another verb or negation is present
+    if (AUX_DO.has(normalized) && (hasOtherMainVerb || /\bnot\b/i.test(clauseText))) {
       dropped.push(rawText);
+      continue;
+    }
+
+    if (INTENSIFIER_PROFANITY.has(normalized)) {
+      commentSlot.push("REALLY");
       continue;
     }
 
@@ -231,11 +244,6 @@ function translateClause(clauseText) {
     }
   }
 
-  // Express collapsed intensifiers cleanly at the end of the comment (ASL non-manual + REALLY)
-  if (hasIntensifier && commentSlot.length > 0 && !commentSlot.includes("REALLY")) {
-    commentSlot.push("REALLY");
-  }
-
   if (hasPastVerb && timeSlot.length === 0) {
     timeSlot.unshift("PAST");
   } else if (hasFutureModal && timeSlot.length === 0) {
@@ -255,8 +263,8 @@ function translateClause(clauseText) {
 
 /**
  * Deterministic English -> ASL Gloss converter (~2ms in-browser).
- * Follows Time -> Topic (Object/Location) -> Comment (Subject + Verb) -> Negation -> WH order.
- * Collapses conversational fillers, multi-word time phrases, and English synonyms to core ASL glosses.
+ * Preserves all meaningful content words while converting English grammar into
+ * ASL Time -> Topic -> Comment -> Negation -> WH order.
  */
 export function translateRuleGloss(inputText) {
   const trimmed = (inputText || "").trim();

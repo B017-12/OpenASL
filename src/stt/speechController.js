@@ -361,6 +361,7 @@ export class SpeechController {
 
     const sessionId = ++this.webSpeechSessionId;
     this.emittedWordsByResult.clear();
+    let lastPending = null; // { idx, words }
 
     const rec = new SR();
     rec.lang = "en-US";
@@ -387,11 +388,11 @@ export class SpeechController {
     const emitNewSlice = (resultIdx, words, forceAll) => {
       if (!this.isListening || sessionId !== this.webSpeechSessionId) return;
       const alreadyEmitted = this.emittedWordsByResult.get(resultIdx) || 0;
+      // Hold back at most 1 in-progress word mid-utterance; emit everything immediately on forceAll
       const commitUpTo = forceAll ? words.length : Math.max(alreadyEmitted, words.length - 1);
       const countToEmit = commitUpTo - alreadyEmitted;
 
       if (countToEmit <= 0) return;
-      if (!forceAll && countToEmit < 2) return;
 
       const slice = words.slice(alreadyEmitted, commitUpTo).join(" ").trim();
       this.emittedWordsByResult.set(resultIdx, commitUpTo);
@@ -406,11 +407,14 @@ export class SpeechController {
 
     rec.onresult = (event) => {
       if (sessionId !== this.webSpeechSessionId) return;
-      this.webSpeechErrorCount = 0; // Reset backoff on any healthy speech event
+      this.webSpeechErrorCount = 0;
       clearTimeout(this.interimFlushTimer);
 
-      let latestInterimIdx = -1;
-      let latestWords = [];
+      // If Chrome jumped resultIndex past a previous interim result, flush its remaining words first!
+      if (lastPending && event.resultIndex > lastPending.idx) {
+        emitNewSlice(lastPending.idx, lastPending.words, true);
+        lastPending = null;
+      }
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const res = event.results[i];
@@ -420,19 +424,21 @@ export class SpeechController {
         const words = txt.split(/\s+/).filter(Boolean);
         if (res.isFinal) {
           emitNewSlice(i, words, true);
+          if (lastPending && lastPending.idx === i) lastPending = null;
           this.onInterim("");
         } else {
           this.onInterim(txt);
           emitNewSlice(i, words, false);
-          latestInterimIdx = i;
-          latestWords = words;
+          lastPending = { idx: i, words };
         }
       }
 
-      if (latestInterimIdx >= 0 && latestWords.length > 0) {
+      if (lastPending && lastPending.words.length > 0) {
+        const snapshot = lastPending;
         this.interimFlushTimer = setTimeout(() => {
-          emitNewSlice(latestInterimIdx, latestWords, true);
-        }, 350);
+          emitNewSlice(snapshot.idx, snapshot.words, true);
+          if (lastPending === snapshot) lastPending = null;
+        }, 280);
       }
     };
 
@@ -452,9 +458,13 @@ export class SpeechController {
     rec.onend = () => {
       if (sessionId !== this.webSpeechSessionId) return;
       clearTimeout(this.interimFlushTimer);
+      // Flush any trailing unemitted word before restarting session
+      if (lastPending) {
+        emitNewSlice(lastPending.idx, lastPending.words, true);
+        lastPending = null;
+      }
       this.emittedWordsByResult.clear();
       if (this.isListening) {
-        // Gentle backoff prevents Chrome InvalidStateError & tight crash loops
         const delay = Math.min(2000, 260 * Math.pow(1.6, this.webSpeechErrorCount));
         scheduleRestart(delay, this.webSpeechErrorCount > 0 ? "Reconnecting Web Speech…" : null);
       }
