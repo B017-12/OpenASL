@@ -10,7 +10,17 @@ Open-source **Real-Time WebAI Speech-to-ASL Virtual Webcam** built for accessibl
 
 ---
 
-## Quickstart (Local Dev)
+## Quickstart (One-Click Windows Launcher)
+
+Double-click **`OpenASL-Start.exe`** in the repo folder (built from `launcher/main.go`). It automatically:
+1. Runs `npm install` (if needed).
+2. Creates an isolated `bridge/.venv` and installs virtual camera dependencies (`pyvirtualcam`, `websockets`, `opencv-python-headless`).
+3. Offers to register the zero-OBS `UnityCaptureFilter64.dll` virtual webcam driver on first run.
+4. Starts both the Virtual Camera Bridge and the WebAI frontend, and opens `http://localhost:5173` in your browser.
+
+---
+
+## Manual Quickstart (Dev)
 
 ### 1. Start the WebAI App
 ```bash

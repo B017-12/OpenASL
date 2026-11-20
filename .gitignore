@@ -7,3 +7,4 @@ dist/
 asl-signs/
 __pycache__/
 *.pyc
+bridge/.venv/
