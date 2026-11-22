@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-OpenASL Zero-OBS Virtual Camera Bridge.
+OpenASL Virtual Camera Bridge.
 Receives 1280x720 JPEG frames from the WebAI HTML5 <canvas> over ws://127.0.0.1:8765
 and writes them directly to a system-level Virtual Webcam device.
 
-Backend Priority (Zero OBS required):
-  - Windows: unitycapture (UnityCaptureFilter64.dll registered via regsvr32) -> obs fallback
+Backend Priority:
+  - Windows: unitycapture (UnityCaptureFilter64.dll registered via regsvr32)
   - Linux:   v4l2loopback (/dev/video*)
-  - macOS:   obs / CoreMediaIO
+  - macOS:   CoreMediaIO / pyvirtualcam default
 """
 
 import argparse
@@ -56,8 +56,8 @@ def open_virtual_camera(preferred_backend: Optional[str], device: Optional[str])
     if preferred_backend:
         candidates = [preferred_backend]
     elif system == "windows":
-        # Prefer UnityCapture (zero-OBS single DLL) before OBS fallback
-        candidates = ["unitycapture", "obs"]
+        # Prefer UnityCapture standalone DirectShow DLL, falling back to default pyvirtualcam backend
+        candidates = ["unitycapture", None]
     elif system == "linux":
         candidates = ["v4l2loopback"]
     else:
@@ -81,7 +81,7 @@ def open_virtual_camera(preferred_backend: Optional[str], device: Optional[str])
             last_err = err
 
     hint = (
-        "Run bridge/install_windows_vcam.ps1 (Administrator) to register UnityCaptureFilter64.dll (no OBS required)."
+        "Run bridge/install_windows_vcam.ps1 (Administrator) to register UnityCaptureFilter64.dll."
         if system == "windows"
         else "Run bridge/setup_linux_vcam.sh to load the v4l2loopback virtual camera kernel module."
         if system == "linux"
@@ -131,10 +131,10 @@ async def run_bridge(host: str, port: int, backend: Optional[str], device: Optio
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OpenASL Zero-OBS Virtual Camera Bridge")
+    parser = argparse.ArgumentParser(description="OpenASL Virtual Camera Bridge")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--backend", default=None, help="Force backend: unitycapture | v4l2loopback | obs")
+    parser.add_argument("--backend", default=None, help="Force pyvirtualcam backend (e.g. unitycapture, v4l2loopback)")
     parser.add_argument("--device", default=None, help="Optional device path or name")
     args = parser.parse_args()
 

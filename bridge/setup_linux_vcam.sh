@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Loads a system-level "OpenASL Camera" virtual webcam device on Linux using v4l2loopback (no OBS needed).
+# Loads a system-level "OpenASL Camera" virtual webcam device on Linux using v4l2loopback.
 set -euo pipefail
 
 if ! modinfo v4l2loopback >/dev/null 2>&1; then

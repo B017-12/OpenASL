@@ -1,6 +1,6 @@
 /**
  * Background-tab-safe WebSocket streamer that pipes 1280x720 HTML5 <canvas> frames
- * to the local zero-OBS Virtual Camera bridge (ws://127.0.0.1:8765).
+ * to the local Virtual Camera bridge (ws://127.0.0.1:8765).
  *
  * Uses an inline Web Worker interval so Chrome/Electron does NOT throttle frame output
  * when the user switches to Zoom, Teams, Discord, or Omegle.

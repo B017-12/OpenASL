@@ -53,7 +53,7 @@ func main() {
 	// 3. Setup Python Virtual Camera Backend (bridge/.venv)
 	bridgePython, bridgeReady := setupPythonBridge(rootDir)
 
-	// 4. On Windows, check if zero-OBS UnityCapture virtual cam DLL is installed
+	// 4. On Windows, check if UnityCapture virtual cam DLL is installed
 	if runtime.GOOS == "windows" && bridgeReady {
 		ensureWindowsVirtualCamDriver(rootDir)
 	}
@@ -206,7 +206,7 @@ func ensureWindowsVirtualCamDriver(rootDir string) {
 	}
 	dllPath := filepath.Join(progFiles, "OpenASL", "driver", "UnityCaptureFilter64.dll")
 	if _, err := os.Stat(dllPath); err == nil {
-		fmt.Println("[Driver] OpenASL zero-OBS virtual camera driver detected.")
+		fmt.Println("[Driver] OpenASL virtual camera driver detected.")
 		return
 	}
 
@@ -215,7 +215,7 @@ func ensureWindowsVirtualCamDriver(rootDir string) {
 		return
 	}
 
-	fmt.Println("\n[Driver] Zero-OBS Virtual Webcam driver (UnityCaptureFilter64.dll) is not installed yet.")
+	fmt.Println("\n[Driver] Virtual Webcam driver (UnityCaptureFilter64.dll) is not installed yet.")
 	fmt.Print("[Driver] Install it now? (Requires Windows Admin UAC prompt) [Y/n]: ")
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')

@@ -137,4 +137,49 @@ export class ASLAssetStore {
       frameCount: data.frames?.length || 0,
     }));
   }
+
+  /**
+   * Returns a Set of all gloss keys that resolve to a real pose (local overrides,
+   * manifest poses, and aliases whose target exists in manifest poses or overrides).
+   */
+  getKnownGlosses() {
+    const known = new Set();
+    for (const key of this.localPoseOverrides.keys()) {
+      known.add(key);
+    }
+    const poses = this.manifest?.poses || {};
+    for (const key of Object.keys(poses)) {
+      known.add(key);
+    }
+    const aliases = this.manifest?.aliases || {};
+    for (const [alias, target] of Object.entries(aliases)) {
+      if (poses[target] || this.localPoseOverrides.has(target)) {
+        known.add(alias);
+      }
+    }
+    return known;
+  }
+
+  /**
+   * Warm-caches high-frequency pose JSONs asynchronously in the background so first
+   * spoken conversational signs hit memory cache with 0ms fetch latency.
+   */
+  async prefetchPoses(glosses = []) {
+    if (!Array.isArray(glosses) || glosses.length === 0) return 0;
+    let loaded = 0;
+    await Promise.all(
+      glosses.map(async (gloss) => {
+        const entry = this.resolvePoseEntry(gloss);
+        if (!entry || entry.data || this.poseCache.has(entry.src)) return;
+        try {
+          await this.loadPoseData(entry);
+          loaded++;
+        } catch {
+          // Non-fatal background prefetch miss
+        }
+      })
+    );
+    return loaded;
+  }
 }
+

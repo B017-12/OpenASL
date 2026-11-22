@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "node scripts/build_manifest.mjs && vite build",
     "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
     "build:manifest": "node scripts/build_manifest.mjs",
     "fetch:alphabet": "python3 scripts/fetch_alphabet.py",
     "fetch:poses": "uv run --with pyarrow --with numpy python3 scripts/fetch_wlasl_poses.py"

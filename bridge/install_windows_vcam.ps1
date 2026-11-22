@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Registers the open-source UnityCapture DirectShow virtual webcam DLL on Windows.
-  Zero OBS Studio or Unity installation required (~250 KB DLL).
+  Lightweight standalone driver (~250 KB DLL, no external suite required).
 #>
 
 $ErrorActionPreference = "Stop"

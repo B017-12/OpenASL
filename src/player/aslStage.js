@@ -11,6 +11,28 @@ const FPS = 30;
 const FRAME_MS = 1000 / FPS;
 const POSE_TRANSITION_FRAMES = 5; // ~165ms smooth joint-to-joint blend between consecutive signs
 const IDLE_FADE_DELAY_FRAMES = 18; // ~600ms hold after finishing a sentence before PiP fades out
+const FALLBACK_DIGIT_WORDS = [
+  "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+];
+
+function expandRawTokenList(tokens) {
+  const expanded = [];
+  for (const rawToken of tokens || []) {
+    const rawStr =
+      typeof rawToken === "object" && rawToken !== null ? rawToken.gloss : rawToken;
+    const gloss = String(rawStr ?? "").toUpperCase().trim();
+    if (!gloss) continue;
+    if (/^\d+$/.test(gloss)) {
+      for (let i = 0; i < gloss.length; i++) {
+        const d = gloss.charCodeAt(i) - 48;
+        if (d >= 0 && d <= 9) expanded.push(FALLBACK_DIGIT_WORDS[d]);
+      }
+    } else {
+      expanded.push(gloss);
+    }
+  }
+  return expanded;
+}
 
 export class ASLStagePlayer {
   constructor(canvas, assetStore, callbacks = {}) {
@@ -18,6 +40,9 @@ export class ASLStagePlayer {
     this.ctx = canvas.getContext("2d", { alpha: false });
     this.assets = assetStore;
     this.onStateChange = callbacks.onStateChange || (() => {});
+    this.onFrame = callbacks.onFrame || (() => {});
+    this.onTokensResolved = callbacks.onTokensResolved || (() => {});
+    this.onTokenRendered = callbacks.onTokenRendered || (() => {});
 
     this.items = [];
     this.activeIndex = -1;
@@ -42,6 +67,11 @@ export class ASLStagePlayer {
     this.lastTickTime = 0;
     this.accumulator = 0;
     this._queueLock = Promise.resolve();
+  }
+
+  getQueueDepth() {
+    if (!this.isPlaying || this.activeIndex < 0) return 0;
+    return Math.max(0, this.items.length - this.activeIndex);
   }
 
   setWebcamVideo(videoEl) {
@@ -85,7 +115,7 @@ export class ASLStagePlayer {
     this.accumulator += dt;
 
     // Adaptive backpressure: speed up tightly if live speech queue builds up
-    const remaining = this.activeIndex >= 0 ? this.items.length - this.activeIndex : 0;
+    const remaining = this.getQueueDepth();
     const pressureBoost = remaining > 6 ? 1.75 : remaining > 3 ? 1.45 : remaining > 1 ? 1.15 : 1.0;
     const effectiveSpeed = Math.min(2.2, this.speed * pressureBoost);
 
@@ -109,46 +139,68 @@ export class ASLStagePlayer {
   }
 
   async resolveTokens(tokens) {
-    const resolved = [];
-    for (const rawToken of tokens) {
-      const gloss = String(rawToken || "").toUpperCase().trim();
-      if (!gloss) continue;
+    const glossList = expandRawTokenList(tokens);
+    if (glossList.length === 0) return [];
 
-      const poseEntry = this.assets.resolvePoseEntry(gloss);
-      if (poseEntry) {
-        try {
-          const poseData = await this.assets.loadPoseData(poseEntry);
-          if (poseData?.frames?.length > 0) {
-            resolved.push({
-              type: "POSE",
-              gloss,
-              canonical: poseEntry.canonical,
-              isOverride: poseEntry.isOverride,
-              frames: poseData.frames,
-              source: poseData.source || "MediaPipe Pose",
-            });
-            continue;
+    // Resolve all pose JSONs concurrently via Promise.all
+    const resolvedEntries = await Promise.all(
+      glossList.map(async (gloss) => {
+        const poseEntry = this.assets.resolvePoseEntry(gloss);
+        if (poseEntry) {
+          try {
+            const poseData = await this.assets.loadPoseData(poseEntry);
+            if (poseData?.frames?.length > 0) {
+              return {
+                type: "POSE",
+                gloss,
+                canonical: poseEntry.canonical,
+                isOverride: poseEntry.isOverride,
+                frames: poseData.frames,
+                source: poseData.source || "MediaPipe Pose",
+              };
+            }
+          } catch (err) {
+            console.warn(`Pose JSON failed for ${gloss}, falling back to fingerspelling:`, err);
           }
-        } catch (err) {
-          console.warn(`Pose JSON failed for ${gloss}, falling back to fingerspelling:`, err);
         }
-      }
 
-      const letters = gloss.replace(/[^A-Z]/g, "").split("");
-      if (letters.length > 0) {
-        resolved.push({
-          type: "FINGERSPELL",
-          gloss,
-          letters,
-        });
-      }
-    }
-    return resolved;
+        // Convert any embedded digits to words so numeric tokens are never silently dropped
+        const alphaGloss = gloss.replace(/\d/g, (ch) => FALLBACK_DIGIT_WORDS[Number(ch)] || "");
+        const letters = alphaGloss.replace(/[^A-Z]/g, "").split("");
+        if (letters.length > 0) {
+          return {
+            type: "FINGERSPELL",
+            gloss,
+            letters,
+          };
+        }
+        return null;
+      })
+    );
+
+    return resolvedEntries.filter(Boolean);
   }
 
-  setTokens(tokens) {
+  setTokens(tokens, trace = null) {
+    const fetchStartMs = performance.now();
+    // Kick off parallel pose fetches immediately outside the queue mutation lock
+    const resolvePromise = this.resolveTokens(tokens);
+
     const task = this._queueLock.then(async () => {
-      const resolved = await this.resolveTokens(tokens);
+      const resolved = await resolvePromise;
+      const poseFetchMs = performance.now() - fetchStartMs;
+
+      if (resolved.length > 0) {
+        if (trace) {
+          resolved[0]._trace = {
+            ...trace,
+            enqueuedAtMs: performance.now(),
+            poseFetchMs,
+          };
+        }
+        this.onTokensResolved(resolved);
+      }
+
       this.items = resolved;
       this.prevPoseFrame = null;
       this.transitionFramesLeft = 0;
@@ -170,13 +222,28 @@ export class ASLStagePlayer {
   }
 
   /**
-   * Serialized queue mode for continuous live speech: appends newly spoken gloss tokens
-   * without racing or cutting off the currently playing sign.
+   * Serialized queue mode for continuous live speech: resolves pose fetches in parallel
+   * outside the lock, then appends newly spoken gloss tokens synchronously in strict order
+   * without cutting off the currently playing sign.
    */
-  appendTokens(tokens) {
+  appendTokens(tokens, trace = null) {
+    const fetchStartMs = performance.now();
+    // Start parallel pose resolution immediately outside _queueLock
+    const resolvePromise = this.resolveTokens(tokens);
+
     const task = this._queueLock.then(async () => {
-      const resolved = await this.resolveTokens(tokens);
+      const resolved = await resolvePromise;
       if (resolved.length === 0) return this.items;
+
+      const poseFetchMs = performance.now() - fetchStartMs;
+      if (trace) {
+        resolved[0]._trace = {
+          ...trace,
+          enqueuedAtMs: performance.now(),
+          poseFetchMs,
+        };
+      }
+      this.onTokensResolved(resolved);
 
       const wasIdle =
         !this.isPlaying || this.activeIndex < 0 || this.activeIndex >= this.items.length;
@@ -276,6 +343,7 @@ export class ASLStagePlayer {
       activeIndex: this.activeIndex,
       charIndex: this.charIndex,
       totalItems: this.items.length,
+      queueDepth: this.getQueueDepth(),
       loop: this.loop,
       speed: this.speed,
       viewMode: this.viewMode,
@@ -380,6 +448,7 @@ export class ASLStagePlayer {
   }
 
   renderFrame() {
+    this.onFrame(performance.now());
     const ctx = this.ctx;
     const W = this.canvas.width;
     const H = this.canvas.height;
@@ -461,6 +530,11 @@ export class ASLStagePlayer {
 
     this.drawCornerStatus(ctx, cardX, cardY, cardSize, item, isWebcam);
     ctx.restore();
+
+    if (item._trace && !item._rendered) {
+      item._rendered = true;
+      this.onTokenRendered(item, performance.now());
+    }
   }
 
   drawFingerspellAsset(ctx, item, cardX, cardY, cardSize, safeCharIdx) {
