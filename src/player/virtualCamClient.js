@@ -17,6 +17,47 @@ export class VirtualCamClient {
     this.inFlight = false;
     this.reconnectTimer = null;
     this.tickerWorker = null;
+
+    // Flip the entire composited Virtual Camera output (webcam + ASL overlay together)
+    // WITHOUT flipping the local webapp view
+    this.flipOutput = false;
+    this._flipCanvas = null;
+    this._flipCtx = null;
+  }
+
+  setFlipOutput(flip) {
+    this.flipOutput = Boolean(flip);
+    return this.flipOutput;
+  }
+
+  toggleFlipOutput() {
+    this.flipOutput = !this.flipOutput;
+    return this.flipOutput;
+  }
+
+  _getSourceCanvas() {
+    if (!this.flipOutput || typeof document === "undefined") {
+      return this.canvas;
+    }
+    const W = this.canvas.width || 1280;
+    const H = this.canvas.height || 720;
+    if (!this._flipCanvas) {
+      this._flipCanvas = document.createElement("canvas");
+      this._flipCanvas.width = W;
+      this._flipCanvas.height = H;
+      this._flipCtx = this._flipCanvas.getContext("2d", { alpha: false });
+    } else if (this._flipCanvas.width !== W || this._flipCanvas.height !== H) {
+      this._flipCanvas.width = W;
+      this._flipCanvas.height = H;
+    }
+
+    const ctx = this._flipCtx;
+    ctx.save();
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(this.canvas, 0, 0, W, H);
+    ctx.restore();
+    return this._flipCanvas;
   }
 
   start(onFrameTick) {
@@ -45,7 +86,9 @@ export class VirtualCamClient {
     this.tickerWorker = new Worker(URL.createObjectURL(blob));
     this.tickerWorker.onmessage = () => {
       if (!this.enabled) return;
-      if (this.onFrameTick) this.onFrameTick();
+      if (this.onFrameTick && (typeof document === "undefined" || document.hidden)) {
+        this.onFrameTick();
+      }
       this.pushCanvasFrame();
     };
   }
@@ -91,7 +134,8 @@ export class VirtualCamClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.inFlight) return;
     this.inFlight = true;
 
-    this.canvas.toBlob(
+    const targetCanvas = this._getSourceCanvas();
+    targetCanvas.toBlob(
       (blob) => {
         if (!blob || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
           this.inFlight = false;

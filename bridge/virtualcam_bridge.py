@@ -12,7 +12,10 @@ Backend Priority:
 
 import argparse
 import asyncio
+import os
+from pathlib import Path
 import platform
+import struct
 import sys
 from typing import Optional
 
@@ -24,6 +27,75 @@ import websockets
 WIDTH, HEIGHT, FPS = 1280, 720, 30
 latest_frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
 connected_clients = 0
+
+
+def ensure_windows_16x9_unitycapture() -> None:
+    """
+    Ensures UnityCaptureFilter64.dll advertises 16:9 resolutions (1280x720 primary)
+    across all DirectShow stream capability slots so downstream apps (WebRTC, Discord,
+    Windows Camera, Zoom) never negotiate a 4:3 (640x480 / 960x720) pin mode.
+    Registers the 16:9 DLL path in HKCU\\Software\\Classes\\CLSID (no Admin required).
+    """
+    if platform.system().lower() != "windows":
+        return
+
+    try:
+        orig_table = [
+            (1920, 1080), (1280, 720), (960, 540), (640, 360),
+            (480, 270), (256, 144), (2560, 1440), (3840, 2160),
+            (1440, 1080), (960, 720), (640, 480), (480, 360),
+            (320, 240), (192, 144), (1920, 1440), (2880, 2160),
+            (1920, 1200), (1280, 800), (2880, 1800), (2560, 1600),
+            (1680, 1050), (1440, 900), (0, 0),
+        ]
+        new_16x9_table = [
+            (1280, 720), (1920, 1080), (960, 540), (640, 360),
+            (1280, 720), (1280, 720), (2560, 1440), (3840, 2160),
+            (1280, 720), (1280, 720), (1280, 720), (640, 360),
+            (640, 360), (640, 360), (1280, 720), (1920, 1080),
+            (1280, 720), (1280, 720), (1920, 1080), (1280, 720),
+            (1280, 720), (1280, 720), (0, 0),
+        ]
+        fmt = "<" + "ii" * len(orig_table)
+        orig_bytes = struct.pack(fmt, *[v for pair in orig_table for v in pair])
+        new_bytes = struct.pack(fmt, *[v for pair in new_16x9_table for v in pair])
+
+        prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        sys_dll = Path(prog_files) / "OpenASL" / "driver" / "UnityCaptureFilter64.dll"
+        local_driver_dir = Path(__file__).resolve().parent / ".driver"
+        local_dll = local_driver_dir / "UnityCaptureFilter64.dll"
+
+        raw_data: Optional[bytes] = None
+        if local_dll.exists():
+            raw_data = local_dll.read_bytes()
+        elif sys_dll.exists():
+            raw_data = sys_dll.read_bytes()
+
+        if not raw_data:
+            return
+
+        if orig_bytes in raw_data:
+            patched = raw_data.replace(orig_bytes, new_bytes, 1)
+            local_driver_dir.mkdir(parents=True, exist_ok=True)
+            local_dll.write_bytes(patched)
+            try:
+                sys_dll.write_bytes(patched)
+            except Exception:
+                pass
+        elif new_bytes in raw_data and not local_dll.exists():
+            local_driver_dir.mkdir(parents=True, exist_ok=True)
+            local_dll.write_bytes(raw_data)
+
+        target_dll = local_dll if local_dll.exists() else sys_dll
+        if target_dll.exists():
+            import winreg  # type: ignore
+
+            clsid_key = r"Software\Classes\CLSID\{5C2CD55C-92AD-4999-8666-912BD3E70010}\InprocServer32"
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, clsid_key, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(target_dll))
+                winreg.SetValueEx(key, "ThreadingModel", 0, winreg.REG_SZ, "Both")
+    except Exception as exc:
+        print(f"[OpenASL Bridge] Note: 16:9 driver pin setup skipped ({exc})")
 
 
 def make_standby_frame() -> np.ndarray:
@@ -53,6 +125,8 @@ def make_standby_frame() -> np.ndarray:
 
 def open_virtual_camera(preferred_backend: Optional[str], device: Optional[str]) -> pyvirtualcam.Camera:
     system = platform.system().lower()
+    if system == "windows":
+        ensure_windows_16x9_unitycapture()
     if preferred_backend:
         candidates = [preferred_backend]
     elif system == "windows":

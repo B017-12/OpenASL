@@ -66,7 +66,10 @@ const assetStore = new ASLAssetStore();
 const webllmEngine = new WebLLMGlossEngine();
 const metrics = new MetricsCollector();
 const diagnosticsHud = new DiagnosticsHud(metrics);
-const streamingGloss = createStreamingGloss();
+const streamingGloss = createStreamingGloss({
+  holdbackWords: 0,
+  enablePhraseLookahead: false,
+});
 
 let timelinePoseCount = 0;
 let timelineSpellCount = 0;
@@ -419,10 +422,37 @@ async function toggleWebcam() {
   }
 
   try {
+    const baseConstraints = {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      aspectRatio: { ideal: 16 / 9 },
+      frameRate: { ideal: 30 },
+    };
+
     webcamStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      video: baseConstraints,
       audio: false,
     });
+
+    // If the browser picked Unity Video Capture / a virtual cam as input, switch to physical webcam
+    const trackLabel = webcamStream.getVideoTracks()[0]?.label || "";
+    if (/unity video capture|virtual cam|v4l2loopback/i.test(trackLabel) && navigator.mediaDevices.enumerateDevices) {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const physicalCam = devices.find(
+        (d) =>
+          d.kind === "videoinput" &&
+          d.deviceId &&
+          !/unity video capture|virtual cam|v4l2loopback/i.test(d.label || "")
+      );
+      if (physicalCam) {
+        webcamStream.getTracks().forEach((t) => t.stop());
+        webcamStream = await navigator.mediaDevices.getUserMedia({
+          video: { ...baseConstraints, deviceId: { exact: physicalCam.deviceId } },
+          audio: false,
+        });
+      }
+    }
+
     els.webcamSource.srcObject = webcamStream;
     await els.webcamSource.play();
     stagePlayer.setWebcamVideo(els.webcamSource);
@@ -459,6 +489,7 @@ async function toggleMic() {
   }
   try {
     streamingGloss.reset();
+    stagePlayer.clearForLiveSpeech();
     await speechController.setEngine(els.sttEngineSelect.value);
     metrics.setContext({ sttEngine: els.sttEngineSelect.value });
     await speechController.start();
@@ -531,9 +562,9 @@ function bindEvents() {
   els.webcamToggleBtn.addEventListener("click", toggleWebcam);
   if (els.flipCamBtn) {
     els.flipCamBtn.addEventListener("click", () => {
-      const mirrored = stagePlayer.toggleMirrorWebcam();
-      els.flipCamBtn.textContent = mirrored ? "Flip Camera (Mirrored)" : "Flip Camera (Normal)";
-      els.flipCamBtn.classList.toggle("is-active", !mirrored);
+      const flipped = vcamClient.toggleFlipOutput();
+      els.flipCamBtn.textContent = flipped ? "Flip Virtual Cam: ON" : "Flip Virtual Cam: OFF";
+      els.flipCamBtn.classList.toggle("is-active", flipped);
     });
   }
   els.vcamToggleBtn.addEventListener("click", toggleVirtualCam);
@@ -619,10 +650,14 @@ async function bootstrap() {
   bindEvents();
   stagePlayer.startLoop();
 
-  if (!SpeechController.hasWebSpeech()) {
+  if (SpeechController.hasWebSpeech()) {
+    els.sttEngineSelect.value = "webspeech";
+    speechController.engine = "webspeech";
+  } else {
     const wsOpt = els.sttEngineSelect.querySelector('option[value="webspeech"]');
     if (wsOpt) wsOpt.disabled = true;
     els.sttEngineSelect.value = "moonshine";
+    speechController.engine = "moonshine";
   }
 
   metrics.setContext({

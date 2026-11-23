@@ -52,7 +52,7 @@
             <button id="micToggleBtn" type="button" class="btn btn-primary">
               Start Mic
             </button>
-            <select id="sttEngineSelect" class="compact-select" aria-label="Speech recognition engine">
+            <select id="sttEngineSelect" class="compact-select" aria-label="Speech recognition engine" autocomplete="off">
               <option value="webspeech" selected>Web Speech (Instant Stream)</option>
               <option value="moonshine">Moonshine WebAI (Offline Stream)</option>
               <option value="whisper">Whisper Tiny.en (Offline)</option>
@@ -66,8 +66,8 @@
             <button id="webcamToggleBtn" type="button" class="btn btn-secondary">
               Enable Webcam PiP
             </button>
-            <button id="flipCamBtn" type="button" class="btn btn-secondary" title="Flip horizontal camera mirror">
-              Flip Camera (Mirrored)
+            <button id="flipCamBtn" type="button" class="btn btn-secondary" title="Flip the entire Virtual Camera output (camera + ASL overlay) without flipping the app view">
+              Flip Virtual Cam: OFF
             </button>
             <button id="vcamToggleBtn" type="button" class="btn btn-secondary">
               Stream Virtual Cam

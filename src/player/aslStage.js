@@ -49,6 +49,7 @@ export class ASLStagePlayer {
     this.isPlaying = false;
     this.loop = false;
     this.speed = 1.0;
+    this._queueSource = "manual";
 
     // Webcam PiP compositing & draggable overlay state
     this.viewMode = "stage"; // "stage" | "webcam"
@@ -82,6 +83,15 @@ export class ASLStagePlayer {
   getQueueDepth() {
     if (!this.isPlaying || this.activeIndex < 0) return 0;
     return Math.max(0, this.items.length - this.activeIndex);
+  }
+
+  clearForLiveSpeech() {
+    if (this._queueSource !== "speech") {
+      this.isPlaying = false;
+      this.activeIndex = this.items.length;
+      this._queueSource = "speech";
+      this.notify();
+    }
   }
 
   setWebcamVideo(videoEl) {
@@ -122,7 +132,7 @@ export class ASLStagePlayer {
     const minY = pad;
     const maxY = Math.max(pad, H - cardSize - hudSpace);
 
-    const defaultX = isWebcam ? Math.min(maxX, W - cardSize - 170) : (W - cardSize) / 2;
+    const defaultX = isWebcam ? Math.min(maxX, W - cardSize - 26) : (W - cardSize) / 2;
     const defaultY = isWebcam ? Math.min(maxY, H - cardSize - 74) : 92;
 
     const x =
@@ -275,8 +285,9 @@ export class ASLStagePlayer {
 
     // Adaptive backpressure: speed up tightly if live speech queue builds up
     const remaining = this.getQueueDepth();
-    const pressureBoost = remaining > 6 ? 1.75 : remaining > 3 ? 1.45 : remaining > 1 ? 1.15 : 1.0;
-    const effectiveSpeed = Math.min(2.2, this.speed * pressureBoost);
+    const pressureBoost =
+      remaining > 5 ? 2.5 : remaining > 3 ? 2.0 : remaining > 2 ? 1.7 : remaining > 1 ? 1.38 : 1.0;
+    const effectiveSpeed = Math.min(2.8, this.speed * pressureBoost);
 
     const targetFrameMs = FRAME_MS / effectiveSpeed;
     let steps = 0;
@@ -360,6 +371,7 @@ export class ASLStagePlayer {
         this.onTokensResolved(resolved);
       }
 
+      this._queueSource = trace?.source === "speech" ? "speech" : "manual";
       this.items = resolved;
       this.prevPoseFrame = null;
       this.transitionFramesLeft = 0;
@@ -404,8 +416,17 @@ export class ASLStagePlayer {
       }
       this.onTokensResolved(resolved);
 
+      const isLiveSpeech = trace?.source === "speech";
+      const preemptManual = isLiveSpeech && this._queueSource !== "speech";
+      if (isLiveSpeech) {
+        this._queueSource = "speech";
+      }
+
       const wasIdle =
-        !this.isPlaying || this.activeIndex < 0 || this.activeIndex >= this.items.length;
+        preemptManual ||
+        !this.isPlaying ||
+        this.activeIndex < 0 ||
+        this.activeIndex >= this.items.length;
 
       if (wasIdle) {
         this.items = resolved;
@@ -414,7 +435,12 @@ export class ASLStagePlayer {
         this.charIndex = 0;
         this.frameInStep = 0;
         this.idleFrames = 0;
+        this.accumulator = 0;
+        this.lastTickTime = performance.now();
         this.seekToToken(0, true);
+        if (this.rafId !== null) {
+          this.renderFrame();
+        }
       } else {
         this.items.push(...resolved);
         if (this.activeIndex > 12) {
@@ -481,8 +507,13 @@ export class ASLStagePlayer {
       nextItem?.type === "POSE" &&
       prevItem.frames.length > 0
     ) {
-      this.prevPoseFrame = prevItem.frames[prevItem.frames.length - 1];
-      this.transitionFramesLeft = POSE_TRANSITION_FRAMES;
+      const lastFrameIdx = Math.min(
+        Math.max(0, this.frameInStep),
+        prevItem.frames.length - 1
+      );
+      this.prevPoseFrame = prevItem.frames[lastFrameIdx];
+      this.transitionFramesLeft =
+        this.items.length - index > 2 ? 3 : POSE_TRANSITION_FRAMES;
     } else {
       this.prevPoseFrame = null;
       this.transitionFramesLeft = 0;
@@ -535,6 +566,7 @@ export class ASLStagePlayer {
 
     this.idleFrames = 0;
     this.fadeOpacity = Math.min(1, this.fadeOpacity + 0.2);
+    const hasPendingQueue = this.getQueueDepth() > 1;
 
     if (item.type === "POSE") {
       if (this.transitionFramesLeft > 0) {
@@ -542,16 +574,20 @@ export class ASLStagePlayer {
         return;
       }
       this.frameInStep++;
-      if (this.frameInStep >= item.frames.length) {
+      const effectiveLen =
+        hasPendingQueue && item.frames.length > 24
+          ? Math.max(20, Math.floor(item.frames.length * 0.75))
+          : item.frames.length;
+      if (this.frameInStep >= effectiveLen) {
         this.advanceToNextToken();
       }
       return;
     }
 
     if (item.type === "FINGERSPELL") {
-      const framesPerLetter = 9;
+      const framesPerLetter = hasPendingQueue ? 6 : 8;
       const isLastChar = this.charIndex === item.letters.length - 1;
-      const holdFrames = isLastChar ? framesPerLetter + 5 : framesPerLetter;
+      const holdFrames = isLastChar && !hasPendingQueue ? framesPerLetter + 4 : framesPerLetter;
 
       this.frameInStep++;
       if (this.frameInStep >= holdFrames) {
