@@ -429,6 +429,11 @@ async function toggleWebcam() {
     metrics.setContext({ viewMode: "webcam" });
     els.webcamToggleBtn.textContent = "Disable Webcam PiP";
     els.webcamToggleBtn.classList.add("is-active");
+
+    // Automatically stream the composited canvas to the Virtual Camera bridge
+    if (!vcamClient.enabled) {
+      toggleVirtualCam();
+    }
   } catch (err) {
     alert(`Could not access webcam: ${err.message}`);
   }
@@ -644,6 +649,11 @@ async function bootstrap() {
   }
 
   await runTranslation();
+
+  // Auto-connect to local Virtual Camera bridge on startup so Unity Video Capture always shows the live canvas
+  if (!vcamClient.enabled) {
+    toggleVirtualCam();
+  }
 }
 
 bootstrap();

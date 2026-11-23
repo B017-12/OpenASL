@@ -45,7 +45,7 @@ export class SpeechController {
           : null);
     this._now = deps.now || (() => performance.now());
 
-    this.engine = "moonshine"; // "moonshine" | "whisper" | "webspeech"
+    this.engine = SpeechController.hasWebSpeech() ? "webspeech" : "moonshine";
     this.isListening = false;
     this.sessionId = 0;
     this._engineSwitchSeq = 0;

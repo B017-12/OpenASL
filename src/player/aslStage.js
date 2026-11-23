@@ -354,16 +354,19 @@ export class ASLStagePlayer {
   advanceState() {
     const item = this.items[this.activeIndex];
     if (!item) {
-      this.fadeOpacity = Math.max(0, this.fadeOpacity - 0.12);
+      this.fadeOpacity = this.viewMode === "webcam" ? 0.88 : Math.max(0, this.fadeOpacity - 0.12);
       return;
     }
 
     if (!this.isPlaying) {
-      // In webcam PiP mode, gently fade out the corner card after a short pause of silence
+      // In webcam PiP mode, keep the corner ASL pane visible at resting opacity so the
+      // last signed gesture / ready card is always visible on the Virtual Camera output
       if (this.viewMode === "webcam") {
         this.idleFrames++;
         if (this.idleFrames > IDLE_FADE_DELAY_FRAMES) {
-          this.fadeOpacity = Math.max(0, this.fadeOpacity - 0.08);
+          this.fadeOpacity = Math.max(0.88, this.fadeOpacity - 0.04);
+        } else {
+          this.fadeOpacity = Math.min(1, this.fadeOpacity + 0.15);
         }
       } else {
         this.fadeOpacity = Math.min(1, this.fadeOpacity + 0.18);
@@ -464,25 +467,25 @@ export class ASLStagePlayer {
       ctx.fillRect(0, 0, W, H);
     }
 
+    // Layout geometry: bottom-right PiP inside 16:9 & 4:3 safe zone in webcam mode vs centered stage card
+    const cardSize = isWebcam ? 280 : 440;
+    const cardX = isWebcam ? W - cardSize - 170 : (W - cardSize) / 2;
+    const cardY = isWebcam ? H - cardSize - 74 : 92;
+    const hudCenterX = cardX + cardSize / 2;
+    const hudCenterY = cardY + cardSize + (isWebcam ? 32 : 44);
+
     const item = this.items[this.activeIndex];
     if (!item) {
-      if (!isWebcam) this.renderEmptyStage(ctx, W, H);
+      if (isWebcam) {
+        this.renderWebcamIdlePiP(ctx, cardX, cardY, cardSize, hudCenterX, hudCenterY);
+      } else {
+        this.renderEmptyStage(ctx, W, H);
+      }
       return;
     }
-
-    if (isWebcam && this.fadeOpacity <= 0.02) {
-      return;
-    }
-
-    // Layout geometry: bottom-right PiP in webcam mode vs centered stage card in text mode
-    const cardSize = isWebcam ? 300 : 440;
-    const cardX = isWebcam ? W - cardSize - 26 : (W - cardSize) / 2;
-    const cardY = isWebcam ? H - cardSize - 76 : 92;
-    const hudCenterX = cardX + cardSize / 2;
-    const hudCenterY = cardY + cardSize + (isWebcam ? 34 : 44);
 
     ctx.save();
-    ctx.globalAlpha = isWebcam ? this.fadeOpacity : Math.max(0.2, this.fadeOpacity);
+    ctx.globalAlpha = isWebcam ? Math.max(0.88, this.fadeOpacity) : Math.max(0.2, this.fadeOpacity);
 
     ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
     ctx.shadowBlur = isWebcam ? 22 : 32;
@@ -716,6 +719,32 @@ export class ASLStagePlayer {
       W / 2,
       H / 2 + 24
     );
+    ctx.restore();
+  }
+
+  renderWebcamIdlePiP(ctx, cardX, cardY, cardSize, hudCenterX, hudCenterY) {
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    ctx.fillStyle = "rgba(246, 243, 235, 0.94)";
+    ctx.beginPath();
+    ctx.roundRect(cardX, cardY, cardSize, cardSize, 20);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(17, 19, 23, 0.14)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = "#111317";
+    ctx.font = "700 22px 'Plus Jakarta Sans', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("OpenASL Ready", cardX + cardSize / 2, cardY + cardSize / 2 - 10);
+
+    ctx.fillStyle = "rgba(17, 19, 23, 0.56)";
+    ctx.font = "500 14px 'Plus Jakarta Sans', system-ui, sans-serif";
+    ctx.fillText("Speak to sign live", cardX + cardSize / 2, cardY + cardSize / 2 + 16);
+
+    this.drawHudPill(ctx, hudCenterX, hudCenterY, "ASL READY", true);
     ctx.restore();
   }
 }
