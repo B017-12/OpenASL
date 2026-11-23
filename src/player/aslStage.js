@@ -50,11 +50,19 @@ export class ASLStagePlayer {
     this.loop = false;
     this.speed = 1.0;
 
-    // Webcam PiP compositing state
+    // Webcam PiP compositing & draggable overlay state
     this.viewMode = "stage"; // "stage" | "webcam"
     this.webcamVideo = null;
     this.mirrorWebcam = true;
     this.idleFrames = IDLE_FADE_DELAY_FRAMES;
+
+    // Custom draggable ASL PiP box coordinates (null = default bottom-right safe zone)
+    this.pipSize = 280;
+    this.pipX = null;
+    this.pipY = null;
+    this._draggingPiP = false;
+    this._dragOffsetX = 0;
+    this._dragOffsetY = 0;
 
     // Frame-level animation state
     this.charIndex = 0;
@@ -67,6 +75,8 @@ export class ASLStagePlayer {
     this.lastTickTime = 0;
     this.accumulator = 0;
     this._queueLock = Promise.resolve();
+
+    this._bindCanvasDragEvents();
   }
 
   getQueueDepth() {
@@ -78,9 +88,158 @@ export class ASLStagePlayer {
     this.webcamVideo = videoEl;
   }
 
+  setMirrorWebcam(mirror) {
+    this.mirrorWebcam = Boolean(mirror);
+    this.notify();
+    return this.mirrorWebcam;
+  }
+
+  toggleMirrorWebcam() {
+    this.mirrorWebcam = !this.mirrorWebcam;
+    this.notify();
+    return this.mirrorWebcam;
+  }
+
   setViewMode(mode) {
     this.viewMode = mode === "webcam" ? "webcam" : "stage";
     this.notify();
+  }
+
+  /**
+   * Computes clamped ASL box coordinates within the 1280x720 camera canvas space
+   * (including room at the bottom for the 38px HUD subtitle pill).
+   */
+  getPiPBounds() {
+    const W = this.canvas?.width || 1280;
+    const H = this.canvas?.height || 720;
+    const isWebcam = this.viewMode === "webcam";
+    const cardSize = isWebcam ? this.pipSize : 440;
+    const hudSpace = isWebcam ? 56 : 68;
+    const pad = 16;
+
+    const minX = pad;
+    const maxX = Math.max(pad, W - cardSize - pad);
+    const minY = pad;
+    const maxY = Math.max(pad, H - cardSize - hudSpace);
+
+    const defaultX = isWebcam ? Math.min(maxX, W - cardSize - 170) : (W - cardSize) / 2;
+    const defaultY = isWebcam ? Math.min(maxY, H - cardSize - 74) : 92;
+
+    const x =
+      this.pipX !== null && Number.isFinite(this.pipX)
+        ? Math.min(maxX, Math.max(minX, Math.round(this.pipX)))
+        : defaultX;
+    const y =
+      this.pipY !== null && Number.isFinite(this.pipY)
+        ? Math.min(maxY, Math.max(minY, Math.round(this.pipY)))
+        : defaultY;
+
+    return {
+      cardX: x,
+      cardY: y,
+      cardSize,
+      totalHeight: cardSize + (isWebcam ? 46 : 60),
+      minX,
+      maxX,
+      minY,
+      maxY,
+    };
+  }
+
+  setPiPPosition(x, y) {
+    const W = this.canvas?.width || 1280;
+    const H = this.canvas?.height || 720;
+    const isWebcam = this.viewMode === "webcam";
+    const cardSize = isWebcam ? this.pipSize : 440;
+    const hudSpace = isWebcam ? 56 : 68;
+    const pad = 16;
+
+    const maxX = Math.max(pad, W - cardSize - pad);
+    const maxY = Math.max(pad, H - cardSize - hudSpace);
+
+    this.pipX = Math.min(maxX, Math.max(pad, Math.round(x)));
+    this.pipY = Math.min(maxY, Math.max(pad, Math.round(y)));
+  }
+
+  _clientToCanvasCoords(clientX, clientY) {
+    if (!this.canvas || typeof this.canvas.getBoundingClientRect !== "function") {
+      return null;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    const scaleX = this.canvas.width / rect.width;
+    const scaleY = this.canvas.height / rect.height;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
+    };
+  }
+
+  _isPointInPiP(cx, cy) {
+    const b = this.getPiPBounds();
+    return (
+      cx >= b.cardX &&
+      cx <= b.cardX + b.cardSize &&
+      cy >= b.cardY &&
+      cy <= b.cardY + b.totalHeight
+    );
+  }
+
+  _bindCanvasDragEvents() {
+    if (!this.canvas || typeof this.canvas.addEventListener !== "function") return;
+
+    const onPointerDown = (e) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      const pt = this._clientToCanvasCoords(e.clientX, e.clientY);
+      if (!pt || !this._isPointInPiP(pt.x, pt.y)) return;
+
+      const b = this.getPiPBounds();
+      this._draggingPiP = true;
+      this._dragOffsetX = pt.x - b.cardX;
+      this._dragOffsetY = pt.y - b.cardY;
+      if (this.canvas.style) this.canvas.style.cursor = "grabbing";
+      if (typeof this.canvas.setPointerCapture === "function" && e.pointerId !== undefined) {
+        try {
+          this.canvas.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore
+        }
+      }
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e) => {
+      const pt = this._clientToCanvasCoords(e.clientX, e.clientY);
+      if (!pt) return;
+
+      if (this._draggingPiP) {
+        this.setPiPPosition(pt.x - this._dragOffsetX, pt.y - this._dragOffsetY);
+        e.preventDefault();
+      } else if (this.canvas.style) {
+        this.canvas.style.cursor = this._isPointInPiP(pt.x, pt.y) ? "grab" : "default";
+      }
+    };
+
+    const onPointerUp = (e) => {
+      if (!this._draggingPiP) return;
+      this._draggingPiP = false;
+      if (typeof this.canvas.releasePointerCapture === "function" && e?.pointerId !== undefined) {
+        try {
+          this.canvas.releasePointerCapture(e.pointerId);
+        } catch {
+          // Ignore
+        }
+      }
+      const pt = e ? this._clientToCanvasCoords(e.clientX, e.clientY) : null;
+      if (this.canvas.style) {
+        this.canvas.style.cursor = pt && this._isPointInPiP(pt.x, pt.y) ? "grab" : "default";
+      }
+    };
+
+    this.canvas.addEventListener("pointerdown", onPointerDown);
+    this.canvas.addEventListener("pointermove", onPointerMove);
+    this.canvas.addEventListener("pointerup", onPointerUp);
+    this.canvas.addEventListener("pointercancel", onPointerUp);
   }
 
   startLoop() {
@@ -467,10 +626,8 @@ export class ASLStagePlayer {
       ctx.fillRect(0, 0, W, H);
     }
 
-    // Layout geometry: bottom-right PiP inside 16:9 & 4:3 safe zone in webcam mode vs centered stage card
-    const cardSize = isWebcam ? 280 : 440;
-    const cardX = isWebcam ? W - cardSize - 170 : (W - cardSize) / 2;
-    const cardY = isWebcam ? H - cardSize - 74 : 92;
+    // Layout geometry: draggable ASL box clamped inside 1280x720 camera bounds
+    const { cardX, cardY, cardSize } = this.getPiPBounds();
     const hudCenterX = cardX + cardSize / 2;
     const hudCenterY = cardY + cardSize + (isWebcam ? 32 : 44);
 

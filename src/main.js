@@ -27,6 +27,7 @@ const els = {
   sttEngineSelect: document.getElementById("sttEngineSelect"),
   micLevelFill: document.getElementById("micLevelFill"),
   webcamToggleBtn: document.getElementById("webcamToggleBtn"),
+  flipCamBtn: document.getElementById("flipCamBtn"),
   vcamToggleBtn: document.getElementById("vcamToggleBtn"),
   sttStatusText: document.getElementById("sttStatusText"),
   liveTranscriptText: document.getElementById("liveTranscriptText"),
@@ -528,6 +529,13 @@ function bindEvents() {
     }
   });
   els.webcamToggleBtn.addEventListener("click", toggleWebcam);
+  if (els.flipCamBtn) {
+    els.flipCamBtn.addEventListener("click", () => {
+      const mirrored = stagePlayer.toggleMirrorWebcam();
+      els.flipCamBtn.textContent = mirrored ? "Flip Camera (Mirrored)" : "Flip Camera (Normal)";
+      els.flipCamBtn.classList.toggle("is-active", !mirrored);
+    });
+  }
   els.vcamToggleBtn.addEventListener("click", toggleVirtualCam);
 
   els.translateForm.addEventListener("submit", (e) => {

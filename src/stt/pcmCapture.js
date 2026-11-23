@@ -77,6 +77,7 @@ export async function createPcmCapture({
   audioCtx,
   mediaStream,
   chunkMs = 80,
+  useWorklet = false,
   onChunk,
 }) {
   const source = audioCtx.createMediaStreamSource(mediaStream);
@@ -87,6 +88,7 @@ export async function createPcmCapture({
   let muteGain = null;
 
   const canUseWorklet =
+    useWorklet === true &&
     typeof AudioWorkletNode !== "undefined" &&
     audioCtx.audioWorklet &&
     typeof audioCtx.audioWorklet.addModule === "function" &&

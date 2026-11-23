@@ -523,6 +523,10 @@ export class SpeechController {
           if (lastPending && lastPending.uttId === uttId) lastPending = null;
           this.onInterim("", buildMeta(uttId, true, speechAnchorMs));
         } else {
+          // Skip duplicate identical interim string for the same utterance
+          if (lastPending && lastPending.uttId === uttId && lastPending.text === txt) {
+            continue;
+          }
           const meta = buildMeta(uttId, false, speechAnchorMs);
           try {
             this.onInterim(txt, meta);
