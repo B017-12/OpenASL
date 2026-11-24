@@ -1,7 +1,11 @@
 /**
  * Loads public/assets/manifest.json, preloads A-Z fingerspelling SVGs,
- * and caches MediaPipe Holistic pose JSON sequences with in-flight deduplication.
+ * trims stationary lead-in/lead-out frames on WLASL poses at load time so signing
+ * begins immediately on Frame 0, and pre-warms all 257 poses in idle batches.
  */
+
+const KEY_HAND_INDICES = [0, 4, 8, 12, 16, 20];
+const KEY_ARM_INDICES = [3, 4, 5, 6];
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -12,6 +16,98 @@ function loadImage(src) {
   });
 }
 
+function measureFrameDelta(f0, f1) {
+  if (!f0 || !f1) return 0;
+  let total = 0;
+  let count = 0;
+
+  for (const key of ["lh", "rh"]) {
+    const a0 = f0[key];
+    const a1 = f1[key];
+    if (Array.isArray(a0) && Array.isArray(a1)) {
+      for (const idx of KEY_HAND_INDICES) {
+        const p0 = a0[idx];
+        const p1 = a1[idx];
+        if (p0 && p1) {
+          total += Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+          count++;
+        }
+      }
+    }
+  }
+
+  const p0Arr = f0.p;
+  const p1Arr = f1.p;
+  if (Array.isArray(p0Arr) && Array.isArray(p1Arr)) {
+    for (const idx of KEY_ARM_INDICES) {
+      const p0 = p0Arr[idx];
+      const p1 = p1Arr[idx];
+      if (p0 && p1) {
+        total += Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+        count++;
+      }
+    }
+  }
+
+  return count > 0 ? total / count : 0;
+}
+
+function isRestingFrame(frame) {
+  if (!frame) return true;
+  const hasHands =
+    (Array.isArray(frame.lh) && frame.lh.some(Boolean)) ||
+    (Array.isArray(frame.rh) && frame.rh.some(Boolean));
+  if (hasHands) return false;
+
+  const p = frame.p;
+  if (!Array.isArray(p)) return true;
+  const lw = p[5];
+  const rw = p[6];
+  const lwResting = !lw || lw[1] > 0.82;
+  const rwResting = !rw || rw[1] > 0.82;
+  return lwResting && rwResting;
+}
+
+/**
+ * Trims dead stationary lead-in and lead-out frames from MediaPipe WLASL pose sequences
+ * at load time (~120–200ms faster visual sign onset on Frame 0).
+ * Short synthetic/test clips (<= 8 frames) are returned untouched.
+ */
+export function trimStationaryPoseFrames(frames) {
+  if (!Array.isArray(frames) || frames.length <= 8) {
+    return frames;
+  }
+
+  const n = frames.length;
+  const deltas = new Float32Array(n - 1);
+  let peakDelta = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const d = measureFrameDelta(frames[i], frames[i + 1]);
+    deltas[i] = d;
+    if (d > peakDelta) peakDelta = d;
+  }
+
+  const motionThreshold = Math.max(0.0035, peakDelta * 0.14);
+  const maxLeadTrim = Math.min(8, Math.floor(n * 0.28));
+  const maxTailTrim = Math.min(8, Math.floor(n * 0.28));
+
+  let start = 0;
+  while (start < maxLeadTrim && (deltas[start] < motionThreshold || isRestingFrame(frames[start]))) {
+    start++;
+  }
+
+  const minEnd = Math.max(start + 9, n - 1 - maxTailTrim);
+  let end = n - 1;
+  while (end > minEnd && (deltas[end - 1] < motionThreshold || isRestingFrame(frames[end]))) {
+    end--;
+  }
+
+  if (start === 0 && end === n - 1) {
+    return frames;
+  }
+  return frames.slice(start, end + 1);
+}
+
 export class ASLAssetStore {
   constructor() {
     this.manifest = { letters: {}, poses: {}, aliases: {} };
@@ -19,6 +115,8 @@ export class ASLAssetStore {
     this.poseCache = new Map();
     this.inFlightPoses = new Map();
     this.localPoseOverrides = new Map();
+    this._idlePrewarmHandle = null;
+    this._idlePrewarmCancelled = false;
   }
 
   async init() {
@@ -73,6 +171,19 @@ export class ASLAssetStore {
     return null;
   }
 
+  /**
+   * Synchronous memory-cache lookup so `ASLStagePlayer.appendTokens` can bypass async
+   * microtasks completely when poses are already warm in RAM.
+   */
+  getCachedPoseData(entry) {
+    if (!entry) return null;
+    if (entry.data) return entry.data;
+    if (entry.src && this.poseCache.has(entry.src)) {
+      return this.poseCache.get(entry.src);
+    }
+    return null;
+  }
+
   async loadPoseData(entry) {
     if (!entry) return null;
     if (entry.data) return entry.data;
@@ -88,10 +199,12 @@ export class ASLAssetStore {
       if (!resp.ok) {
         throw new Error(`Failed to load pose JSON: ${entry.src}`);
       }
-      const data = await resp.json();
-      if (!Array.isArray(data.frames) || data.frames.length === 0) {
+      const raw = await resp.json();
+      if (!Array.isArray(raw.frames) || raw.frames.length === 0) {
         throw new Error(`Pose JSON has no frames: ${entry.src}`);
       }
+      const trimmedFrames = trimStationaryPoseFrames(raw.frames);
+      const data = trimmedFrames === raw.frames ? raw : { ...raw, frames: trimmedFrames };
       this.poseCache.set(entry.src, data);
       return data;
     })();
@@ -118,12 +231,14 @@ export class ASLAssetStore {
 
     if (!key) throw new Error("Could not determine a gloss name for this pose JSON.");
 
+    const trimmedFrames = trimStationaryPoseFrames(parsed.frames);
     this.localPoseOverrides.set(key, {
       ...parsed,
+      frames: trimmedFrames,
       gloss: key,
       fileName: file.name,
     });
-    return { gloss: key, frameCount: parsed.frames.length, fileName: file.name };
+    return { gloss: key, frameCount: trimmedFrames.length, fileName: file.name };
   }
 
   clearLocalPose(gloss) {
@@ -181,5 +296,66 @@ export class ASLAssetStore {
     );
     return loaded;
   }
-}
 
+  /**
+   * Pre-warms all remaining manifest poses (all 257 WLASL signs) in non-blocking
+   * `requestIdleCallback` batches so live signing hits the synchronous cached fast-path.
+   */
+  prewarmAllPosesInIdle({ batchSize = 12, scheduleIdle } = {}) {
+    const allGlosses = Object.keys(this.manifest?.poses || {});
+    if (allGlosses.length === 0) return Promise.resolve(0);
+
+    this._idlePrewarmCancelled = false;
+    const schedule =
+      scheduleIdle ||
+      (typeof requestIdleCallback === "function"
+        ? (cb) => requestIdleCallback(cb, { timeout: 600 })
+        : (cb) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 12 }), 24));
+
+    let cursor = 0;
+    let loadedCount = 0;
+
+    return new Promise((resolve) => {
+      const step = async () => {
+        if (this._idlePrewarmCancelled) {
+          resolve(loadedCount);
+          return;
+        }
+
+        const batch = [];
+        while (cursor < allGlosses.length && batch.length < batchSize) {
+          const gloss = allGlosses[cursor++];
+          const src = this.manifest.poses[gloss];
+          if (src && !this.poseCache.has(src) && !this.inFlightPoses.has(src)) {
+            batch.push(gloss);
+          }
+        }
+
+        if (batch.length > 0) {
+          loadedCount += await this.prefetchPoses(batch);
+        }
+
+        if (cursor < allGlosses.length && !this._idlePrewarmCancelled) {
+          this._idlePrewarmHandle = schedule(step);
+        } else {
+          this._idlePrewarmHandle = null;
+          resolve(loadedCount);
+        }
+      };
+
+      this._idlePrewarmHandle = schedule(step);
+    });
+  }
+
+  cancelIdlePrewarm() {
+    this._idlePrewarmCancelled = true;
+    if (this._idlePrewarmHandle !== null) {
+      if (typeof cancelIdleCallback === "function") {
+        cancelIdleCallback(this._idlePrewarmHandle);
+      } else {
+        clearTimeout(this._idlePrewarmHandle);
+      }
+      this._idlePrewarmHandle = null;
+    }
+  }
+}

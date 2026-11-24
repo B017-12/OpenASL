@@ -1,7 +1,8 @@
 /**
  * Live 2D Articulated Signer Renderer for MediaPipe Holistic Pose JSONs.
  * Draws real Deaf-signer landmark coordinates directly onto HTML5 <canvas>
- * with zero pre-rendered videos or AI-generated imagery.
+ * inside a smoked-obsidian architectural viewfinder (zero pre-rendered videos,
+ * zero rounded pills, high-contrast studio telemetry palette).
  */
 
 // Standard MediaPipe 21-point hand bone connections
@@ -96,10 +97,10 @@ function drawHand(ctx, handPts, rect, isDominant) {
   if (!handPts) return;
   const mapped = handPts.map((pt) => toCanvas(pt, rect));
 
-  // Filled palm silhouette
+  // Filled palm silhouette (dominant = studio phosphor-teal, non-dominant = WebAI signal amber)
   const palmPts = PALM_POLYGON.map((idx) => mapped[idx]).filter(Boolean);
   if (palmPts.length >= 4) {
-    ctx.fillStyle = isDominant ? "rgba(56, 152, 138, 0.22)" : "rgba(217, 119, 54, 0.2)";
+    ctx.fillStyle = isDominant ? "rgba(42, 195, 162, 0.22)" : "rgba(240, 124, 24, 0.20)";
     ctx.beginPath();
     ctx.moveTo(palmPts[0][0], palmPts[0][1]);
     for (let i = 1; i < palmPts.length; i++) {
@@ -109,9 +110,9 @@ function drawHand(ctx, handPts, rect, isDominant) {
     ctx.fill();
   }
 
-  // Finger bones
-  const boneColor = isDominant ? "#1c5e54" : "#8f4818";
-  const jointColor = isDominant ? "#38988a" : "#d97736";
+  // Finger bones calibrated for dark smoked-obsidian legibility (zero halation)
+  const boneColor = isDominant ? "#36CFAF" : "#F08524";
+  const jointColor = isDominant ? "#89F0DA" : "#FFC184";
 
   ctx.strokeStyle = boneColor;
   ctx.lineCap = "round";
@@ -121,23 +122,22 @@ function drawHand(ctx, handPts, rect, isDominant) {
     const pa = mapped[a];
     const pb = mapped[b];
     if (!pa || !pb) continue;
-    // Slightly thinner bones toward fingertips for anatomical clarity
     const isTip = b % 4 === 0 && b > 0;
-    ctx.lineWidth = isTip ? 4.2 : 5.5;
+    ctx.lineWidth = isTip ? 4.0 : 5.2;
     ctx.beginPath();
     ctx.moveTo(pa[0], pa[1]);
     ctx.lineTo(pb[0], pb[1]);
     ctx.stroke();
   }
 
-  // Articulated joint dots
+  // Articulated joint markers
   for (let i = 0; i < mapped.length; i++) {
     const pt = mapped[i];
     if (!pt) continue;
     const isTip = i % 4 === 0 && i > 0;
-    ctx.fillStyle = isTip ? "#111317" : jointColor;
+    ctx.fillStyle = isTip ? "#EAECEF" : jointColor;
     ctx.beginPath();
-    ctx.arc(pt[0], pt[1], isTip ? 3.2 : 2.6, 0, Math.PI * 2);
+    ctx.arc(pt[0], pt[1], isTip ? 3.1 : 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -150,7 +150,7 @@ export function renderPoseFrame(ctx, frame, rect) {
 
   ctx.save();
   ctx.beginPath();
-  ctx.roundRect(rect.x + 8, rect.y + 8, rect.size - 16, rect.size - 16, 20);
+  ctx.rect(rect.x + 2, rect.y + 2, rect.size - 4, rect.size - 4);
   ctx.clip();
 
   const p = frame.p || [];
@@ -163,14 +163,14 @@ export function renderPoseFrame(ctx, frame, rect) {
   const lWrist = toCanvas(p[5], rect);
   const rWrist = toCanvas(p[6], rect);
 
-  // 1. Stylized torso & head silhouette anchor
+  // 1. Stylized torso & head silhouette anchor on smoked-obsidian
   if (lShoulder && rShoulder) {
     const midX = (lShoulder[0] + rShoulder[0]) * 0.5;
     const midY = (lShoulder[1] + rShoulder[1]) * 0.5;
     const shoulderW = Math.hypot(lShoulder[0] - rShoulder[0], lShoulder[1] - rShoulder[1]);
 
-    // Soft torso shape
-    ctx.fillStyle = "rgba(17, 19, 23, 0.08)";
+    // Subtle architectural torso silhouette
+    ctx.fillStyle = "rgba(234, 236, 239, 0.055)";
     ctx.beginPath();
     ctx.moveTo(lShoulder[0], lShoulder[1]);
     ctx.lineTo(rShoulder[0], rShoulder[1]);
@@ -180,7 +180,7 @@ export function renderPoseFrame(ctx, frame, rect) {
     ctx.fill();
 
     // Shoulder line
-    drawLimb(ctx, lShoulder, rShoulder, 10, "rgba(17, 19, 23, 0.24)");
+    drawLimb(ctx, lShoulder, rShoulder, 9.5, "rgba(148, 158, 174, 0.34)");
 
     // Head outline anchored to nose / shoulder midpoint
     const headX = nose ? nose[0] : midX;
@@ -188,9 +188,9 @@ export function renderPoseFrame(ctx, frame, rect) {
     const headRx = Math.max(26, shoulderW * 0.24);
     const headRy = headRx * 1.24;
 
-    ctx.fillStyle = "rgba(17, 19, 23, 0.06)";
-    ctx.strokeStyle = "rgba(17, 19, 23, 0.22)";
-    ctx.lineWidth = 2.5;
+    ctx.fillStyle = "rgba(234, 236, 239, 0.045)";
+    ctx.strokeStyle = "rgba(234, 236, 239, 0.30)";
+    ctx.lineWidth = 2.2;
     ctx.beginPath();
     ctx.ellipse(headX, headY, headRx, headRy, 0, 0, Math.PI * 2);
     ctx.fill();
@@ -199,18 +199,18 @@ export function renderPoseFrame(ctx, frame, rect) {
 
   // 2. Facial non-manual grammar cues (eyebrows, eyes, mouth)
   if (frame.f && frame.f.length >= 22) {
-    ctx.strokeStyle = "rgba(17, 19, 23, 0.55)";
-    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = "rgba(234, 236, 239, 0.72)";
+    ctx.lineWidth = 2.3;
     ctx.lineCap = "round";
     // Eyebrows (critical for WH vs Yes/No questions in ASL)
     drawPolyline(ctx, frame.f.slice(0, 5), rect, false);
     drawPolyline(ctx, frame.f.slice(5, 10), rect, false);
     // Eyes
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = 1.7;
     drawPolyline(ctx, frame.f.slice(10, 14), rect, true);
     drawPolyline(ctx, frame.f.slice(14, 18), rect, true);
     // Mouth
-    ctx.lineWidth = 2.2;
+    ctx.lineWidth = 2.1;
     drawPolyline(ctx, frame.f.slice(18, 22), rect, true);
   }
 
@@ -218,11 +218,11 @@ export function renderPoseFrame(ctx, frame, rect) {
   const lhWrist = frame.lh?.[0] ? toCanvas(frame.lh[0], rect) : lWrist;
   const rhWrist = frame.rh?.[0] ? toCanvas(frame.rh[0], rect) : rWrist;
 
-  drawLimb(ctx, lShoulder, lElbow, 11, "rgba(17, 19, 23, 0.28)");
-  drawLimb(ctx, lElbow, lhWrist, 9, "rgba(17, 19, 23, 0.34)");
+  drawLimb(ctx, lShoulder, lElbow, 10, "rgba(148, 158, 174, 0.36)");
+  drawLimb(ctx, lElbow, lhWrist, 8.5, "rgba(200, 208, 220, 0.44)");
 
-  drawLimb(ctx, rShoulder, rElbow, 11, "rgba(17, 19, 23, 0.28)");
-  drawLimb(ctx, rElbow, rhWrist, 9, "rgba(17, 19, 23, 0.34)");
+  drawLimb(ctx, rShoulder, rElbow, 10, "rgba(148, 158, 174, 0.36)");
+  drawLimb(ctx, rElbow, rhWrist, 8.5, "rgba(200, 208, 220, 0.44)");
 
   // 4. Articulated Hands (foreground layer)
   drawHand(ctx, frame.lh, rect, false);

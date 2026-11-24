@@ -10,6 +10,7 @@ import { VirtualCamClient } from "./player/virtualCamClient.js";
 import { SpeechController } from "./stt/speechController.js";
 import { MetricsCollector } from "./diagnostics/metricsCollector.js";
 import { DiagnosticsHud } from "./diagnostics/diagnosticsHud.js";
+import { BayerDitherBackground } from "./ui/bayerDitherBg.js";
 
 const PREFETCH_HIGH_FREQ_GLOSSES = [
   "I", "YOU", "HELLO", "YES", "NO", "GOOD", "BAD", "WANT", "NEED", "GO",
@@ -19,6 +20,10 @@ const PREFETCH_HIGH_FREQ_GLOSSES = [
 ];
 
 const els = {
+  bayerHeroBg: document.getElementById("bayerHeroBg"),
+  stageAnchor: document.getElementById("stageAnchor"),
+  webaiHeaderBadge: document.getElementById("webaiHeaderBadge"),
+  webaiActiveLabel: document.getElementById("webaiActiveLabel"),
   assetStatusBadge: document.getElementById("assetStatusBadge"),
   webgpuBadge: document.getElementById("webgpuBadge"),
   vcamStatusBadge: document.getElementById("vcamStatusBadge"),
@@ -51,6 +56,7 @@ const els = {
   webllmProgressWrap: document.getElementById("webllmProgressWrap"),
   webllmProgressBar: document.getElementById("webllmProgressBar"),
   webllmStatusText: document.getElementById("webllmStatusText"),
+  poseCacheStat: document.getElementById("poseCacheStat"),
   slotTime: document.getElementById("slotTime"),
   slotTopic: document.getElementById("slotTopic"),
   slotComment: document.getElementById("slotComment"),
@@ -66,6 +72,7 @@ const assetStore = new ASLAssetStore();
 const webllmEngine = new WebLLMGlossEngine();
 const metrics = new MetricsCollector();
 const diagnosticsHud = new DiagnosticsHud(metrics);
+const bayerBg = new BayerDitherBackground(els.bayerHeroBg, els.stageAnchor);
 const streamingGloss = createStreamingGloss({
   holdbackWords: 0,
   enablePhraseLookahead: false,
@@ -75,6 +82,57 @@ let timelinePoseCount = 0;
 let timelineSpellCount = 0;
 let renderedTimelineFirst = null;
 let renderedTimelineCount = 0;
+let lastScrolledChipIdx = -1;
+
+// Coalesce overlapping async interim runs so rapid speech bursts never backlog
+let interimRunInFlight = false;
+let queuedInterimJob = null;
+
+function syncWebAIRimState() {
+  const sttVal = els.sttEngineSelect?.value || "webspeech";
+  const isWebAIStt = sttVal === "moonshine" || sttVal === "whisper";
+  const isWebLLMSelected = Boolean(els.modeWebLLM?.checked);
+  const webaiActive = isWebAIStt || isWebLLMSelected;
+
+  document.body.classList.toggle("is-webai-active", webaiActive);
+  if (els.sttEngineSelect) {
+    els.sttEngineSelect.classList.toggle("is-webai-select", isWebAIStt);
+  }
+  if (els.webaiHeaderBadge) {
+    els.webaiHeaderBadge.hidden = !webaiActive;
+  }
+  if (els.webaiActiveLabel && webaiActive) {
+    const parts = [];
+    if (isWebAIStt) {
+      parts.push(sttVal === "moonshine" ? "MOONSHINE" : "WHISPER");
+    }
+    if (isWebLLMSelected) {
+      parts.push("WEBLLM");
+    }
+    els.webaiActiveLabel.textContent = `WEBAI // ${parts.join(" + ")}`;
+  }
+}
+
+function bindInspectorTabs() {
+  const tabBtns = Array.from(document.querySelectorAll("[data-inspector-tab]"));
+  const tabPanes = Array.from(document.querySelectorAll("[data-inspector-pane]"));
+  if (tabBtns.length === 0) return;
+
+  const activateTab = (targetKey) => {
+    for (const btn of tabBtns) {
+      const isMatch = btn.dataset.inspectorTab === targetKey;
+      btn.classList.toggle("is-active", isMatch);
+      btn.setAttribute("aria-selected", isMatch ? "true" : "false");
+    }
+    for (const pane of tabPanes) {
+      pane.hidden = pane.dataset.inspectorPane !== targetKey;
+    }
+  };
+
+  for (const btn of tabBtns) {
+    btn.addEventListener("click", () => activateTab(btn.dataset.inspectorTab));
+  }
+}
 
 const stagePlayer = new ASLStagePlayer(els.canvas, assetStore, {
   onStateChange: (state) => {
@@ -128,12 +186,11 @@ async function enqueueLiveTokens(res, meta = {}) {
       inputWords: res.committedWords.length,
       outputTokens: res.tokens.length,
     });
-    els.engineLatency.textContent = `Stream · ${res.glossMs.toFixed(2)}ms`;
+    els.engineLatency.textContent = `STREAM · ${res.glossMs.toFixed(2)}ms`;
   }
 
   if (res.tokens.length === 0) return;
 
-  // Record estimated STT latency on cumulative interim emissions that trigger signing
   if (meta.isCumulative && !meta.isFinal) {
     metrics.recordStt({
       engine: meta.engine || "webspeech",
@@ -194,6 +251,26 @@ async function handleLiveSpeech(text, meta = {}) {
   await enqueueLiveTokens(res, meta);
 }
 
+async function processCoalescedInterim(text, meta) {
+  if (interimRunInFlight) {
+    queuedInterimJob = { text, meta };
+    return;
+  }
+  interimRunInFlight = true;
+  let current = { text, meta };
+  try {
+    while (current) {
+      queuedInterimJob = null;
+      await handleLiveSpeech(current.text, { ...current.meta, isFinal: false });
+      current = queuedInterimJob;
+    }
+  } catch (err) {
+    console.error("[OpenASL] Interim translation error recovered:", err);
+  } finally {
+    interimRunInFlight = false;
+  }
+}
+
 const speechController = new SpeechController({
   onStatus: (text, state) => {
     els.sttStatusText.textContent = text;
@@ -209,7 +286,9 @@ const speechController = new SpeechController({
   onListeningChange: (isListening) => {
     els.micToggleBtn.textContent = isListening ? "Stop Mic" : "Start Mic";
     els.micToggleBtn.classList.toggle("is-active", isListening);
+    bayerBg.setMicLive(isListening);
     if (!isListening) {
+      queuedInterimJob = null;
       streamingGloss.reset();
     }
   },
@@ -218,11 +297,7 @@ const speechController = new SpeechController({
       els.liveTranscriptText.textContent = text;
     }
     if (meta.isCumulative && text) {
-      try {
-        await handleLiveSpeech(text, { ...meta, isFinal: false });
-      } catch (err) {
-        console.error("[OpenASL] Interim translation error recovered:", err);
-      }
+      await processCoalescedInterim(text, meta);
     } else if (meta.isFinal && !meta.isCumulative) {
       try {
         const flushed = streamingGloss.flush({
@@ -238,10 +313,13 @@ const speechController = new SpeechController({
     }
   },
   onLevel: (lvl) => {
-    els.micLevelFill.style.width = `${Math.round(lvl * 100)}%`;
+    const clamped = Math.max(0, Math.min(1, Number(lvl) || 0));
+    els.micLevelFill.style.width = `${Math.round(clamped * 100)}%`;
+    bayerBg.setMicLevel(clamped);
   },
   onTranscript: async (text, meta = {}) => {
     try {
+      queuedInterimJob = null;
       const latLabel =
         typeof meta.latencyMs === "number" && meta.latencyMs > 0
           ? ` · ${meta.latencyMs}ms${meta.sttEstimated ? " est" : ""}`
@@ -283,8 +361,18 @@ function syncPlaybackUI(state) {
 
   const chips = els.glossTimeline.querySelectorAll(".gloss-chip");
   chips.forEach((chip, idx) => {
-    chip.classList.toggle("is-active", idx === state.activeIndex);
+    const isActive = idx === state.activeIndex;
+    chip.classList.toggle("is-active", isActive);
+    if (isActive && idx !== lastScrolledChipIdx) {
+      lastScrolledChipIdx = idx;
+      if (typeof chip.scrollIntoView === "function") {
+        chip.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    }
   });
+  if (!hasItems) {
+    lastScrolledChipIdx = -1;
+  }
 }
 
 function createTimelineChip(item, idx) {
@@ -294,6 +382,10 @@ function createTimelineChip(item, idx) {
   btn.setAttribute("role", "listitem");
   btn.addEventListener("click", () => stagePlayer.seekToToken(idx, true, false));
 
+  const idxSpan = document.createElement("span");
+  idxSpan.className = "chip-idx";
+  idxSpan.textContent = String(idx + 1).padStart(2, "0");
+
   const wordSpan = document.createElement("span");
   wordSpan.textContent = item.gloss;
 
@@ -301,14 +393,14 @@ function createTimelineChip(item, idx) {
   kindBadge.className = `chip-kind ${item.type === "POSE" ? "pose" : "spell"}`;
   kindBadge.textContent = item.type === "POSE" ? "POSE" : "SPELL";
 
-  btn.append(wordSpan, kindBadge);
+  btn.append(idxSpan, wordSpan, kindBadge);
   return btn;
 }
 
 function updateTimelineSummary() {
-  els.glossSummary.textContent = `${timelinePoseCount} pose sign${
-    timelinePoseCount === 1 ? "" : "s"
-  } · ${timelineSpellCount} fingerspelled`;
+  const p = String(timelinePoseCount).padStart(2, "0");
+  const s = String(timelineSpellCount).padStart(2, "0");
+  els.glossSummary.textContent = `${p} POSES · ${s} SPELL`;
 }
 
 function appendTimelineChips(newItems, startIndex) {
@@ -334,13 +426,14 @@ function renderTimeline(items) {
   els.glossTimeline.innerHTML = "";
   timelinePoseCount = 0;
   timelineSpellCount = 0;
+  lastScrolledChipIdx = -1;
   renderedTimelineFirst = items && items.length > 0 ? items[0] : null;
   renderedTimelineCount = items ? items.length : 0;
 
   if (!items || items.length === 0) {
     els.glossTimeline.innerHTML =
-      '<p class="empty-hint">No sign tokens found for this input.</p>';
-    els.glossSummary.textContent = "";
+      '<p class="empty-hint">NO SIGN TOKENS RESOLVED FOR INPUT.</p>';
+    els.glossSummary.textContent = "00 POSES · 00 SPELL";
     return;
   }
 
@@ -384,7 +477,7 @@ async function runTranslation({ append = false, overrideText = null } = {}) {
   const elapsedMs = performance.now() - t0;
 
   const formattedMs = elapsedMs < 10 ? elapsedMs.toFixed(1) : String(Math.round(elapsedMs));
-  els.engineLatency.textContent = `${result.engine === "webllm" ? "WebLLM" : "Rule"} · ${formattedMs}ms`;
+  els.engineLatency.textContent = `${result.engine === "webllm" ? "WEBLLM" : "RULE"} · ${formattedMs}ms`;
 
   metrics.recordGloss({
     mode: result.engine === "webllm" ? "webllm" : "batch-ttc",
@@ -416,7 +509,7 @@ async function toggleWebcam() {
     stagePlayer.setWebcamVideo(null);
     stagePlayer.setViewMode("stage");
     metrics.setContext({ viewMode: "stage" });
-    els.webcamToggleBtn.textContent = "Enable Webcam PiP";
+    els.webcamToggleBtn.textContent = "Webcam PiP";
     els.webcamToggleBtn.classList.remove("is-active");
     return;
   }
@@ -434,9 +527,11 @@ async function toggleWebcam() {
       audio: false,
     });
 
-    // If the browser picked Unity Video Capture / a virtual cam as input, switch to physical webcam
     const trackLabel = webcamStream.getVideoTracks()[0]?.label || "";
-    if (/unity video capture|virtual cam|v4l2loopback/i.test(trackLabel) && navigator.mediaDevices.enumerateDevices) {
+    if (
+      /unity video capture|virtual cam|v4l2loopback/i.test(trackLabel) &&
+      navigator.mediaDevices.enumerateDevices
+    ) {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const physicalCam = devices.find(
         (d) =>
@@ -458,10 +553,9 @@ async function toggleWebcam() {
     stagePlayer.setWebcamVideo(els.webcamSource);
     stagePlayer.setViewMode("webcam");
     metrics.setContext({ viewMode: "webcam" });
-    els.webcamToggleBtn.textContent = "Disable Webcam PiP";
+    els.webcamToggleBtn.textContent = "Webcam PiP: ON";
     els.webcamToggleBtn.classList.add("is-active");
 
-    // Automatically stream the composited canvas to the Virtual Camera bridge
     if (!vcamClient.enabled) {
       toggleVirtualCam();
     }
@@ -473,11 +567,11 @@ async function toggleWebcam() {
 function toggleVirtualCam() {
   if (vcamClient.enabled) {
     vcamClient.stop();
-    els.vcamToggleBtn.textContent = "Stream Virtual Cam";
+    els.vcamToggleBtn.textContent = "Stream VCam";
     els.vcamToggleBtn.classList.remove("is-active");
   } else {
     vcamClient.start(() => stagePlayer.tickExternal());
-    els.vcamToggleBtn.textContent = "Stop Virtual Cam";
+    els.vcamToggleBtn.textContent = "Stop VCam";
     els.vcamToggleBtn.classList.add("is-active");
   }
 }
@@ -506,7 +600,7 @@ function renderLocalPoseList() {
     li.className = "override-item";
 
     const label = document.createElement("span");
-    label.textContent = `${item.gloss} (${item.frameCount}f)`;
+    label.textContent = `${item.gloss} (${item.frameCount}F)`;
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
@@ -544,10 +638,12 @@ async function handlePoseFiles(files) {
 
 function bindEvents() {
   diagnosticsHud.bindShortcut(window);
+  bindInspectorTabs();
 
   els.micToggleBtn.addEventListener("click", toggleMic);
   els.sttEngineSelect.addEventListener("change", async (e) => {
     const nextEngine = e.target.value;
+    syncWebAIRimState();
     streamingGloss.reset();
     metrics.setContext({
       sttEngine: nextEngine,
@@ -563,7 +659,7 @@ function bindEvents() {
   if (els.flipCamBtn) {
     els.flipCamBtn.addEventListener("click", () => {
       const flipped = vcamClient.toggleFlipOutput();
-      els.flipCamBtn.textContent = flipped ? "Flip Virtual Cam: ON" : "Flip Virtual Cam: OFF";
+      els.flipCamBtn.textContent = flipped ? "Flip VCam: ON" : "Flip VCam: OFF";
       els.flipCamBtn.classList.toggle("is-active", flipped);
     });
   }
@@ -603,6 +699,7 @@ function bindEvents() {
   const onModeChange = () => {
     els.webllmPanel.hidden = !els.modeWebLLM.checked;
     metrics.setContext({ glossMode: els.modeWebLLM.checked ? "webllm" : "stream-pse" });
+    syncWebAIRimState();
   };
   els.modeRule.addEventListener("change", onModeChange);
   els.modeWebLLM.addEventListener("change", onModeChange);
@@ -648,6 +745,7 @@ function bindEvents() {
 async function bootstrap() {
   populateModels();
   bindEvents();
+  bayerBg.start();
   stagePlayer.startLoop();
 
   if (SpeechController.hasWebSpeech()) {
@@ -659,6 +757,7 @@ async function bootstrap() {
     els.sttEngineSelect.value = "moonshine";
     speechController.engine = "moonshine";
   }
+  syncWebAIRimState();
 
   metrics.setContext({
     sttEngine: els.sttEngineSelect.value,
@@ -677,23 +776,38 @@ async function bootstrap() {
     sttDevice: gpuStatus.supported ? "webgpu" : "wasm",
   });
 
-  // Warm-cache top ~30 conversational poses asynchronously in the background
-  assetStore.prefetchPoses(PREFETCH_HIGH_FREQ_GLOSSES).catch(() => {});
+  // 1. Immediately warm-cache top conversational poses, then pre-warm all 257 poses in requestIdleCallback batches
+  if (els.poseCacheStat) {
+    els.poseCacheStat.textContent = `WARMING 0/${assetSummary.poseCount}…`;
+  }
+  assetStore
+    .prefetchPoses(PREFETCH_HIGH_FREQ_GLOSSES)
+    .then(() => {
+      if (els.poseCacheStat) {
+        els.poseCacheStat.textContent = `${assetStore.poseCache.size}/${assetSummary.poseCount} RAM WARM`;
+      }
+      return assetStore.prewarmAllPosesInIdle({ batchSize: 14 });
+    })
+    .then(() => {
+      if (els.poseCacheStat) {
+        els.poseCacheStat.textContent = `${assetStore.poseCache.size}/${assetSummary.poseCount} RAM READY`;
+      }
+    })
+    .catch(() => {});
 
-  els.assetStatusBadge.textContent = `${assetSummary.letterCount} A–Z · ${assetSummary.poseCount} Word Poses`;
+  els.assetStatusBadge.textContent = `${assetSummary.letterCount} A–Z · ${assetSummary.poseCount} POSES`;
   els.assetStatusBadge.classList.add("is-ready");
 
   if (gpuStatus.supported) {
-    els.webgpuBadge.textContent = "WebGPU Available";
+    els.webgpuBadge.textContent = "WEBGPU READY";
     els.webgpuBadge.classList.add("is-ready");
   } else {
-    els.webgpuBadge.textContent = "WASM / Rule Mode";
+    els.webgpuBadge.textContent = "WASM · RULE";
     els.modeWebLLM.disabled = true;
   }
 
   await runTranslation();
 
-  // Auto-connect to local Virtual Camera bridge on startup so Unity Video Capture always shows the live canvas
   if (!vcamClient.enabled) {
     toggleVirtualCam();
   }

@@ -99,14 +99,14 @@ def ensure_windows_16x9_unitycapture() -> None:
 
 
 def make_standby_frame() -> np.ndarray:
-    frame = np.full((HEIGHT, WIDTH, 3), (17, 19, 23), dtype=np.uint8)
+    frame = np.full((HEIGHT, WIDTH, 3), (13, 10, 8), dtype=np.uint8)
     cv2.putText(
         frame,
-        "OpenASL Virtual Camera Ready",
-        (350, 345),
+        "OPENASL VIRTUAL CAMERA READY",
+        (335, 345),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.1,
-        (243, 241, 236),
+        1.05,
+        (239, 236, 234),
         2,
         cv2.LINE_AA,
     )
@@ -115,12 +115,12 @@ def make_standby_frame() -> np.ndarray:
         "Enable Webcam PiP + Virtual Cam in OpenASL to stream live",
         (285, 395),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.75,
-        (168, 164, 156),
+        0.72,
+        (174, 158, 148),
         1,
         cv2.LINE_AA,
     )
-    return frame
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
 def open_virtual_camera(preferred_backend: Optional[str], device: Optional[str]) -> pyvirtualcam.Camera:
@@ -164,7 +164,7 @@ def open_virtual_camera(preferred_backend: Optional[str], device: Optional[str])
     raise RuntimeError(f"Could not open virtual camera ({last_err}).\nHint: {hint}")
 
 
-async def frame_receiver(websocket) -> None:
+async def frame_receiver(websocket, frame_event: asyncio.Event) -> None:
     global latest_frame, connected_clients
     connected_clients += 1
     print(f"[OpenASL Bridge] Client connected ({websocket.remote_address})")
@@ -177,6 +177,7 @@ async def frame_receiver(websocket) -> None:
                     if bgr.shape[1] != WIDTH or bgr.shape[0] != HEIGHT:
                         bgr = cv2.resize(bgr, (WIDTH, HEIGHT), interpolation=cv2.INTER_LINEAR)
                     latest_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    frame_event.set()
     except websockets.ConnectionClosed:
         pass
     finally:
@@ -184,24 +185,36 @@ async def frame_receiver(websocket) -> None:
         print("[OpenASL Bridge] Client disconnected.")
         if connected_clients == 0:
             latest_frame = make_standby_frame()
+            frame_event.set()
 
 
-async def camera_pump(cam: pyvirtualcam.Camera) -> None:
+async def camera_pump(cam: pyvirtualcam.Camera, frame_event: asyncio.Event) -> None:
     interval = 1.0 / FPS
     while True:
+        try:
+            await asyncio.wait_for(frame_event.wait(), timeout=interval)
+            frame_event.clear()
+        except asyncio.TimeoutError:
+            pass
         cam.send(latest_frame)
-        await asyncio.sleep(interval)
 
 
 async def run_bridge(host: str, port: int, backend: Optional[str], device: Optional[str]) -> None:
     global latest_frame
     latest_frame = make_standby_frame()
+    frame_event = asyncio.Event()
 
     with open_virtual_camera(backend, device) as cam:
         print(f"[OpenASL VirtualCam] Active -> {cam.device} (backend={cam.backend}, {WIDTH}x{HEIGHT}@{FPS}fps)")
-        print(f"[OpenASL Bridge] Listening on ws://{host}:{port}")
-        async with websockets.serve(frame_receiver, host, port, max_size=4 * 1024 * 1024):
-            await camera_pump(cam)
+        print(f"[OpenASL Bridge] Listening on ws://{host}:{port} (compression=None, event-driven)")
+        async with websockets.serve(
+            lambda ws: frame_receiver(ws, frame_event),
+            host,
+            port,
+            max_size=4 * 1024 * 1024,
+            compression=None,
+        ):
+            await camera_pump(cam, frame_event)
 
 
 def main() -> None:

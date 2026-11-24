@@ -22,12 +22,12 @@ const MODEL_CONFIGS = {
   },
 };
 
-const MIN_FIRST_DECODE_MS = 380;
-const STEP_CADENCE_MS = 260;
+const MIN_FIRST_DECODE_MS = 340;
+const STEP_CADENCE_MS = 220;
 const MICRO_PAUSE_MS = 280;
 const MAX_WINDOW_SEC = 4.5;
 const COMPACT_KEEP_SEC = 1.4;
-const MIN_NEW_SAMPLES = Math.round(TARGET_SAMPLE_RATE * 0.16); // 160ms new audio
+const MIN_NEW_SAMPLES = 2048; // ~128ms new 16kHz audio matching 2048 PCM capture
 
 const audioBuffer = new StreamingAudioBuffer({
   sampleRate: TARGET_SAMPLE_RATE,

@@ -2,18 +2,21 @@
  * Real-Time Streaming Speech-to-Text Controller (100% In-Browser WebAI + Optional Web Speech Toggle).
  *
  * Engines:
- *   1. "moonshine" (Default) — Offline WebAI Streaming (onnx-community/moonshine-tiny-ONNX)
- *                              running in a dedicated Web Worker with AudioWorklet PCM capture,
- *                              sliding-window adaptive VAD, and LocalAgreement-2 word commit.
- *   2. "webspeech" (Optional) — Browser Web Speech API emitting cumulative streaming hypotheses
- *                              with monotonic utteranceId & estimated speech timestamps.
- *   3. "whisper"   (Offline)  — Offline WebAI Whisper Tiny.en in the same sliding-window worker.
+ *   1. "moonshine" — Offline WebAI Streaming (onnx-community/moonshine-tiny-ONNX)
+ *                    running in a dedicated Web Worker with 2048-sample PCM capture,
+ *                    sliding-window adaptive VAD, and LocalAgreement-2 word commit.
+ *   2. "webspeech" — Browser Web Speech API emitting cumulative streaming hypotheses
+ *                    with rapid-interim burst coalescing, passive AnalyserNode mic-level meter,
+ *                    monotonic utteranceId & estimated speech timestamps.
+ *   3. "whisper"   — Offline WebAI Whisper Tiny.en in the same sliding-window worker.
  */
 
-import { createPcmCapture } from "./pcmCapture.js";
+import { DEFAULT_PCM_BUFFER_SIZE, createPcmCapture } from "./pcmCapture.js";
 
 const VALID_ENGINES = new Set(["moonshine", "whisper", "webspeech"]);
 const WEBSPEECH_PAUSE_FLUSH_MS = 160;
+const WEBSPEECH_INTERIM_COALESCE_MS = 24;
+const PASSIVE_METER_POLL_MS = 45;
 
 export class SpeechController {
   constructor(callbacks = {}, deps = {}) {
@@ -33,16 +36,33 @@ export class SpeechController {
     this._createPcmCapture = deps.createPcmCapture || createPcmCapture;
     this._getUserMedia =
       deps.getUserMedia ||
-      ((constraints) => navigator.mediaDevices.getUserMedia(constraints));
+      ((constraints) =>
+        typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia
+          ? navigator.mediaDevices.getUserMedia(constraints)
+          : Promise.reject(new Error("getUserMedia unavailable")));
     this._createAudioContext =
       deps.createAudioContext ||
-      (() => new (window.AudioContext || window.webkitAudioContext)());
+      (() => {
+        const Ctor =
+          typeof window !== "undefined"
+            ? window.AudioContext || window.webkitAudioContext
+            : null;
+        if (!Ctor) throw new Error("AudioContext unavailable");
+        return new Ctor();
+      });
     this._getSpeechRecognition =
       deps.getSpeechRecognition ||
       (() =>
         typeof window !== "undefined"
           ? window.SpeechRecognition || window.webkitSpeechRecognition || null
           : null);
+    this._enableWebSpeechMeter =
+      deps.enableWebSpeechMeter ??
+      (() =>
+        typeof window !== "undefined" &&
+        Boolean(window.AudioContext || window.webkitAudioContext) &&
+        typeof navigator !== "undefined" &&
+        Boolean(navigator.mediaDevices?.getUserMedia));
     this._now = deps.now || (() => performance.now());
 
     this.engine = SpeechController.hasWebSpeech() ? "webspeech" : "moonshine";
@@ -59,13 +79,20 @@ export class SpeechController {
     this.pcmCapture = null;
     this._utteranceCounter = 1;
 
-    // Web Speech API state
+    // Web Speech API + passive AnalyserNode meter + interim burst coalescer state
     this.recognition = null;
     this.interimFlushTimer = null;
+    this.interimCoalesceTimer = null;
     this.webSpeechRestartTimer = null;
     this.webSpeechErrorCount = 0;
     this._webSpeechNetworkErrors = 0;
     this._webSpeechUtteranceBase = 0;
+
+    this._meterStream = null;
+    this._meterAudioCtx = null;
+    this._meterSource = null;
+    this._meterAnalyser = null;
+    this._meterTimer = null;
   }
 
   static hasWebSpeech() {
@@ -251,14 +278,125 @@ export class SpeechController {
     }
   }
 
+  _stopPassiveMeter() {
+    if (this._meterTimer !== null) {
+      clearInterval(this._meterTimer);
+      this._meterTimer = null;
+    }
+    if (this._meterSource) {
+      try {
+        this._meterSource.disconnect();
+      } catch {
+        // Ignore
+      }
+      this._meterSource = null;
+    }
+    this._meterAnalyser = null;
+    if (this._meterAudioCtx) {
+      try {
+        this._meterAudioCtx.close().catch(() => {});
+      } catch {
+        // Ignore
+      }
+      this._meterAudioCtx = null;
+    }
+    if (this._meterStream) {
+      try {
+        this._meterStream.getTracks().forEach((t) => t.stop());
+      } catch {
+        // Ignore
+      }
+      this._meterStream = null;
+    }
+  }
+
+  async _startPassiveMeter(sessionId) {
+    if (!this._enableWebSpeechMeter() || this._meterStream) return;
+
+    let stream = null;
+    let audioCtx = null;
+    try {
+      stream = await this._getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+
+      if (sessionId !== this.sessionId || !this.isListening || this.engine !== "webspeech") {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      audioCtx = this._createAudioContext();
+      if (audioCtx && audioCtx.state === "suspended" && typeof audioCtx.resume === "function") {
+        await audioCtx.resume();
+      }
+
+      if (
+        sessionId !== this.sessionId ||
+        !this.isListening ||
+        this.engine !== "webspeech" ||
+        typeof audioCtx.createAnalyser !== "function"
+      ) {
+        if (audioCtx && typeof audioCtx.close === "function") {
+          audioCtx.close().catch(() => {});
+        }
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.45;
+      source.connect(analyser);
+
+      const timeBuf = new Float32Array(analyser.fftSize);
+      this._meterStream = stream;
+      this._meterAudioCtx = audioCtx;
+      this._meterSource = source;
+      this._meterAnalyser = analyser;
+
+      this._meterTimer = setInterval(() => {
+        if (sessionId !== this.sessionId || !this.isListening || !this._meterAnalyser) {
+          this._stopPassiveMeter();
+          return;
+        }
+        this._meterAnalyser.getFloatTimeDomainData(timeBuf);
+        let sumSq = 0;
+        for (let i = 0; i < timeBuf.length; i++) {
+          const s = timeBuf[i];
+          if (Number.isFinite(s)) sumSq += s * s;
+        }
+        const rms = Math.sqrt(sumSq / timeBuf.length);
+        const safeRms = Number.isFinite(rms) && rms >= 0 ? rms : 0;
+        this.onLevel(Math.min(1, safeRms * 10));
+      }, PASSIVE_METER_POLL_MS);
+    } catch {
+      if (audioCtx && typeof audioCtx.close === "function") {
+        audioCtx.close().catch(() => {});
+      }
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    }
+  }
+
   stop({ silentStatus = false } = {}) {
     const nextSessionId = ++this.sessionId;
     this._setListening(false);
 
     clearTimeout(this.interimFlushTimer);
+    clearTimeout(this.interimCoalesceTimer);
     clearTimeout(this.webSpeechRestartTimer);
     this.interimFlushTimer = null;
+    this.interimCoalesceTimer = null;
     this.webSpeechRestartTimer = null;
+    this._stopPassiveMeter();
     this.onLevel(0);
 
     if (this.worker) {
@@ -324,7 +462,6 @@ export class SpeechController {
       video: false,
     });
 
-    // Guard against stop() or setEngine() occurring while awaiting mic permission
     if (sessionId !== this.sessionId || !this.isListening) {
       stream.getTracks().forEach((t) => t.stop());
       return;
@@ -349,7 +486,8 @@ export class SpeechController {
       capture = await this._createPcmCapture({
         audioCtx,
         mediaStream: stream,
-        chunkMs: 80,
+        chunkMs: 42.67,
+        bufferSize: DEFAULT_PCM_BUFFER_SIZE,
         onChunk: ({ pcm, rms, captureTimestampMs }) => {
           if (sessionId !== this.sessionId || !this.isListening) return;
           const safeRms = Number.isFinite(rms) && rms >= 0 ? rms : 0;
@@ -374,7 +512,6 @@ export class SpeechController {
       throw err;
     }
 
-    // Re-check sessionId after async AudioWorklet module registration
     if (sessionId !== this.sessionId || !this.isListening) {
       capture.stop();
       if (audioCtx && typeof audioCtx.close === "function") {
@@ -398,9 +535,10 @@ export class SpeechController {
   }
 
   /**
-   * Optional Web Speech API (Instant Stream) with unified sessionId guard,
-   * cumulative hypothesis emission (diffed & stabilized by StreamingRuleGloss),
-   * and fast 160ms pause flush.
+   * Browser Web Speech API (Instant Stream) with:
+   * - Passive lightweight AnalyserNode mic-level meter so `#micLevelFill` stays live
+   * - Leading-edge + 24ms trailing burst coalescing for rapid interim hypotheses
+   * - Unified sessionId guard and fast 160ms pause flush
    */
   startWebSpeechStreaming(sessionId) {
     const SR = this._getSpeechRecognition();
@@ -411,6 +549,7 @@ export class SpeechController {
     }
 
     clearTimeout(this.interimFlushTimer);
+    clearTimeout(this.interimCoalesceTimer);
     clearTimeout(this.webSpeechRestartTimer);
 
     if (this.recognition) {
@@ -427,11 +566,16 @@ export class SpeechController {
       this.recognition = null;
     }
 
+    // Start passive AnalyserNode meter once per listening session (persists across SR restarts)
+    this._startPassiveMeter(sessionId);
+
     this._webSpeechUtteranceBase += 1000;
     const utteranceBase = this._webSpeechUtteranceBase;
     const speechStartByResult = new Map();
     let lastSpeechStartMs = 0;
     let lastPending = null; // { uttId, text, speechTimestampMs }
+    let lastInterimDispatchMs = -Infinity;
+    let coalescedInterim = null; // { uttId, text, speechTimestampMs }
 
     const rec = new SR();
     rec.lang = "en-US";
@@ -469,8 +613,53 @@ export class SpeechController {
       };
     };
 
+    const cancelCoalescedInterim = () => {
+      clearTimeout(this.interimCoalesceTimer);
+      this.interimCoalesceTimer = null;
+      coalescedInterim = null;
+    };
+
+    const dispatchInterimNow = (uttId, text, speechTimestampMs) => {
+      if (!this.isListening || sessionId !== this.sessionId || !text) return;
+      lastInterimDispatchMs = this._now();
+      const meta = buildMeta(uttId, false, speechTimestampMs);
+      try {
+        this.onInterim(text, meta);
+      } catch (err) {
+        console.error("[OpenASL STT] Interim callback error:", err);
+      }
+    };
+
+    const emitCoalescedInterim = (uttId, text, speechTimestampMs) => {
+      const now = this._now();
+      const sinceLast = now - lastInterimDispatchMs;
+      if (sinceLast >= WEBSPEECH_INTERIM_COALESCE_MS) {
+        cancelCoalescedInterim();
+        dispatchInterimNow(uttId, text, speechTimestampMs);
+        return;
+      }
+
+      coalescedInterim = { uttId, text, speechTimestampMs };
+      if (this.interimCoalesceTimer === null) {
+        const waitMs = Math.max(1, WEBSPEECH_INTERIM_COALESCE_MS - sinceLast);
+        this.interimCoalesceTimer = setTimeout(() => {
+          this.interimCoalesceTimer = null;
+          if (!coalescedInterim || !this.isListening || sessionId !== this.sessionId) {
+            coalescedInterim = null;
+            return;
+          }
+          const latest = coalescedInterim;
+          coalescedInterim = null;
+          dispatchInterimNow(latest.uttId, latest.text, latest.speechTimestampMs);
+        }, waitMs);
+      }
+    };
+
     const emitFinal = (uttId, text, speechTimestampMs) => {
       if (!this.isListening || sessionId !== this.sessionId || !text) return;
+      if (coalescedInterim && coalescedInterim.uttId === uttId) {
+        cancelCoalescedInterim();
+      }
       const meta = buildMeta(uttId, true, speechTimestampMs);
       try {
         this.onTranscript(text, meta);
@@ -503,6 +692,9 @@ export class SpeechController {
         lastPending = null;
       }
 
+      // Within a single event batch, coalesce multiple non-final interims for the same utterance
+      let latestInterimForTurn = null;
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const res = event.results[i];
         const txt = res[0]?.transcript?.trim() || "";
@@ -519,22 +711,25 @@ export class SpeechController {
         const speechAnchorMs = speechStartByResult.get(uttId);
 
         if (res.isFinal) {
+          latestInterimForTurn = null;
           emitFinal(uttId, txt, speechAnchorMs);
           if (lastPending && lastPending.uttId === uttId) lastPending = null;
           this.onInterim("", buildMeta(uttId, true, speechAnchorMs));
         } else {
-          // Skip duplicate identical interim string for the same utterance
           if (lastPending && lastPending.uttId === uttId && lastPending.text === txt) {
             continue;
           }
-          const meta = buildMeta(uttId, false, speechAnchorMs);
-          try {
-            this.onInterim(txt, meta);
-          } catch (err) {
-            console.error("[OpenASL STT] Interim callback error:", err);
-          }
-          lastPending = { uttId, text: txt, speechTimestampMs: speechAnchorMs };
+          latestInterimForTurn = { uttId, text: txt, speechTimestampMs: speechAnchorMs };
+          lastPending = latestInterimForTurn;
         }
+      }
+
+      if (latestInterimForTurn) {
+        emitCoalescedInterim(
+          latestInterimForTurn.uttId,
+          latestInterimForTurn.text,
+          latestInterimForTurn.speechTimestampMs
+        );
       }
 
       if (lastPending && lastPending.text) {
@@ -550,11 +745,13 @@ export class SpeechController {
     rec.onerror = (e) => {
       if (sessionId !== this.sessionId) return;
       if (e.error === "not-allowed") {
+        this._stopPassiveMeter();
         this._setListening(false);
         this.onStatus("Mic permission blocked by browser.", "error");
         return;
       }
       if (e.error === "service-not-allowed") {
+        this._stopPassiveMeter();
         this._setListening(false);
         this.onStatus(
           "Web Speech unavailable (cloud service blocked) — switch to Moonshine Offline WebAI.",
@@ -568,6 +765,7 @@ export class SpeechController {
         if (this._webSpeechNetworkErrors >= 2) {
           clearTimeout(this.webSpeechRestartTimer);
           this.webSpeechRestartTimer = null;
+          this._stopPassiveMeter();
           this._setListening(false);
           this.onStatus(
             "Web Speech unavailable (cloud service blocked) — switch to Moonshine Offline WebAI.",
@@ -587,6 +785,7 @@ export class SpeechController {
     rec.onend = () => {
       if (sessionId !== this.sessionId) return;
       clearTimeout(this.interimFlushTimer);
+      cancelCoalescedInterim();
       if (lastPending) {
         emitFinal(lastPending.uttId, lastPending.text, lastPending.speechTimestampMs);
         lastPending = null;

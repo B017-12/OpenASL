@@ -1,10 +1,12 @@
 /**
- * Browser PCM Audio Capture using an inline-Blob AudioWorkletNode (~80ms 16kHz mono PCM + RMS
- * computed on the audio rendering thread, zero-copy Transferable), with a transparent
- * muted ScriptProcessorNode fallback for restricted sandboxes.
+ * Browser PCM Audio Capture using an inline-Blob AudioWorkletNode (2048-sample / ~42.6ms 16kHz
+ * mono PCM + RMS computed on the audio rendering thread, zero-copy Transferable), with a
+ * transparent muted 2048-sample ScriptProcessorNode fallback for Windows/restricted sandboxes.
  */
 
 import { TARGET_SAMPLE_RATE, downsampleTo16k } from "./audioRingBuffer.js";
+
+export const DEFAULT_PCM_BUFFER_SIZE = 2048;
 
 const WORKLET_PROCESSOR_NAME = "openasl-pcm-capture-processor";
 
@@ -12,10 +14,16 @@ const WORKLET_SOURCE = `
 class OpenASLPcmCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
-    const targetChunkMs = (options && options.processorOptions && options.processorOptions.chunkMs) || 80;
+    const procOpts = (options && options.processorOptions) || {};
     this.targetRate = 16000;
     this.inputRate = sampleRate || 48000;
-    this.batchSize = Math.max(256, Math.round((this.inputRate * targetChunkMs) / 1000));
+    const explicitBufferSize = Number(procOpts.bufferSize);
+    if (Number.isFinite(explicitBufferSize) && explicitBufferSize >= 256) {
+      this.batchSize = Math.round(explicitBufferSize);
+    } else {
+      const targetChunkMs = Number(procOpts.chunkMs) || 42.67;
+      this.batchSize = Math.max(256, Math.round((this.inputRate * targetChunkMs) / 1000));
+    }
     this.buffer = new Float32Array(this.batchSize);
     this.offset = 0;
   }
@@ -76,11 +84,14 @@ registerProcessor("${WORKLET_PROCESSOR_NAME}", OpenASLPcmCaptureProcessor);
 export async function createPcmCapture({
   audioCtx,
   mediaStream,
-  chunkMs = 80,
+  chunkMs = 42.67,
+  bufferSize = DEFAULT_PCM_BUFFER_SIZE,
   useWorklet = false,
   onChunk,
 }) {
   const source = audioCtx.createMediaStreamSource(mediaStream);
+  const resolvedBufferSize =
+    Number.isFinite(bufferSize) && bufferSize >= 256 ? Math.round(bufferSize) : DEFAULT_PCM_BUFFER_SIZE;
   let active = true;
   let mode = "worklet";
   let workletNode = null;
@@ -109,7 +120,7 @@ export async function createPcmCapture({
         numberOfInputs: 1,
         numberOfOutputs: 0,
         channelCount: 1,
-        processorOptions: { chunkMs },
+        processorOptions: { chunkMs, bufferSize: resolvedBufferSize },
       });
 
       workletNode.port.onmessage = (event) => {
@@ -143,8 +154,7 @@ export async function createPcmCapture({
   if (!workletNode) {
     mode = "scriptprocessor";
     const sampleRate = audioCtx.sampleRate || 48000;
-    const bufferSize = 2048;
-    processorNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    processorNode = audioCtx.createScriptProcessor(resolvedBufferSize, 1, 1);
     muteGain = audioCtx.createGain();
     muteGain.gain.value = 0;
 
@@ -177,6 +187,7 @@ export async function createPcmCapture({
 
   return {
     mode,
+    bufferSize: resolvedBufferSize,
     targetSampleRate: TARGET_SAMPLE_RATE,
     stop() {
       active = false;

@@ -2,15 +2,39 @@
  * Background-tab-safe WebSocket streamer that pipes 1280x720 HTML5 <canvas> frames
  * to the local Virtual Camera bridge (ws://127.0.0.1:8765).
  *
- * Uses an inline Web Worker interval so Chrome/Electron does NOT throttle frame output
- * when the user switches to Zoom, Teams, Discord, or Omegle.
+ * Architecture:
+ * - Offloads horizontal full-frame flipping, JPEG encoding (`OffscreenCanvas.convertToBlob`),
+ *   30 FPS background ticking, and binary WebSocket streaming with `ws.bufferedAmount`
+ *   backpressure protection onto a dedicated Web Worker (`virtualCam.worker.js`).
+ * - Falls back cleanly to main-thread `toBlob` with identical `ws.bufferedAmount`
+ *   backpressure protection if `OffscreenCanvas` or `createImageBitmap` is unavailable.
  */
 
+const MAX_BUFFERED_BYTES = 256 * 1024;
+
 export class VirtualCamClient {
-  constructor(canvas, onStatusChange = () => {}, wsUrl = "ws://127.0.0.1:8765") {
+  constructor(canvas, onStatusChange = () => {}, wsUrl = "ws://127.0.0.1:8765", deps = {}) {
     this.canvas = canvas;
     this.wsUrl = wsUrl;
     this.onStatusChange = onStatusChange;
+
+    this._createWorker =
+      deps.createWorker ||
+      (() =>
+        new Worker(new URL("./virtualCam.worker.js", import.meta.url), {
+          type: "module",
+        }));
+    this._hasOffscreenPipeline =
+      deps.hasOffscreenPipeline ??
+      (() =>
+        typeof Worker !== "undefined" &&
+        typeof OffscreenCanvas !== "undefined" &&
+        typeof createImageBitmap === "function");
+    this._createImageBitmap =
+      deps.createImageBitmap || ((source) => createImageBitmap(source));
+
+    this.worker = null;
+    this.usingWorkerPipeline = false;
 
     this.ws = null;
     this.enabled = false;
@@ -27,12 +51,14 @@ export class VirtualCamClient {
 
   setFlipOutput(flip) {
     this.flipOutput = Boolean(flip);
+    if (this.worker && this.usingWorkerPipeline) {
+      this.worker.postMessage({ type: "SET_FLIP", flipOutput: this.flipOutput });
+    }
     return this.flipOutput;
   }
 
   toggleFlipOutput() {
-    this.flipOutput = !this.flipOutput;
-    return this.flipOutput;
+    return this.setFlipOutput(!this.flipOutput);
   }
 
   _getSourceCanvas() {
@@ -63,20 +89,103 @@ export class VirtualCamClient {
   start(onFrameTick) {
     this.enabled = true;
     this.onFrameTick = onFrameTick;
+
+    if (this._hasOffscreenPipeline()) {
+      try {
+        this._startWorkerPipeline();
+        return;
+      } catch {
+        this.usingWorkerPipeline = false;
+      }
+    }
+
     this.startBackgroundTicker();
     this.connect();
   }
 
+  _startWorkerPipeline() {
+    if (!this.worker) {
+      this.worker = this._createWorker();
+      this.worker.onmessage = (event) => {
+        const msg = event.data || {};
+        if (msg.type === "STATUS") {
+          this.onStatusChange(msg.state, msg.label);
+          return;
+        }
+        if (msg.type === "TICK") {
+          if (!this.enabled) return;
+          if (this.onFrameTick && (typeof document === "undefined" || document.hidden)) {
+            this.onFrameTick();
+          }
+          if (msg.canAcceptFrame) {
+            this._transferFrameBitmap();
+          }
+        }
+      };
+    }
+
+    this.usingWorkerPipeline = true;
+    this.inFlight = false;
+    this.worker.postMessage({
+      type: "START",
+      wsUrl: this.wsUrl,
+      flipOutput: this.flipOutput,
+    });
+  }
+
+  _transferFrameBitmap() {
+    if (!this.enabled || !this.worker || this.inFlight || !this.canvas) return;
+    this.inFlight = true;
+    this._createImageBitmap(this.canvas)
+      .then((bitmap) => {
+        if (!this.enabled || !this.worker) {
+          if (bitmap && typeof bitmap.close === "function") bitmap.close();
+          return;
+        }
+        this.worker.postMessage(
+          { type: "FRAME", bitmap, flipOutput: this.flipOutput },
+          [bitmap]
+        );
+      })
+      .catch(() => {
+        // Ignore transient frame capture error
+      })
+      .finally(() => {
+        this.inFlight = false;
+      });
+  }
+
   stop() {
     this.enabled = false;
+    this.inFlight = false;
     clearTimeout(this.reconnectTimer);
     this.stopBackgroundTicker();
+
+    if (this.worker && this.usingWorkerPipeline) {
+      try {
+        this.worker.postMessage({ type: "STOP" });
+      } catch {
+        // Ignore
+      }
+      this.onStatusChange("disconnected", "VCAM OFF");
+      return;
+    }
+
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.close();
       this.ws = null;
     }
-    this.onStatusChange("disconnected", "Virtual Cam Off");
+    this.onStatusChange("disconnected", "VCAM OFF");
+  }
+
+  destroy() {
+    this.stop();
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.usingWorkerPipeline = false;
   }
 
   startBackgroundTicker() {
@@ -102,14 +211,14 @@ export class VirtualCamClient {
 
   connect() {
     if (!this.enabled) return;
-    this.onStatusChange("connecting", "Connecting to Virtual Cam…");
+    this.onStatusChange("connecting", "VCAM CONNECTING");
 
     try {
       const ws = new WebSocket(this.wsUrl);
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        this.onStatusChange("connected", "Virtual Cam Live");
+        this.onStatusChange("connected", "VCAM LIVE");
       };
 
       ws.onerror = () => {
@@ -119,32 +228,48 @@ export class VirtualCamClient {
       ws.onclose = () => {
         this.ws = null;
         if (this.enabled) {
-          this.onStatusChange("waiting", "Bridge offline (run virtualcam_bridge.py)");
+          this.onStatusChange("waiting", "VCAM STANDBY");
           this.reconnectTimer = setTimeout(() => this.connect(), 2000);
         }
       };
 
       this.ws = ws;
     } catch {
-      this.onStatusChange("waiting", "Bridge offline");
+      this.onStatusChange("waiting", "VCAM STANDBY");
     }
   }
 
   pushCanvasFrame() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.inFlight) return;
+    if (
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN ||
+      this.inFlight ||
+      this.ws.bufferedAmount > MAX_BUFFERED_BYTES
+    ) {
+      return;
+    }
     this.inFlight = true;
 
     const targetCanvas = this._getSourceCanvas();
     targetCanvas.toBlob(
       (blob) => {
-        if (!blob || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        if (
+          !blob ||
+          !this.ws ||
+          this.ws.readyState !== WebSocket.OPEN ||
+          this.ws.bufferedAmount > MAX_BUFFERED_BYTES
+        ) {
           this.inFlight = false;
           return;
         }
         blob
           .arrayBuffer()
           .then((buf) => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (
+              this.ws &&
+              this.ws.readyState === WebSocket.OPEN &&
+              this.ws.bufferedAmount <= MAX_BUFFERED_BYTES
+            ) {
               this.ws.send(buf);
             }
           })
